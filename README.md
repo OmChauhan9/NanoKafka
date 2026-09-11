@@ -23,5 +23,10 @@ The goal of this project is to understand the core architecture of Apache Kafka 
 - **Controller & Election**: Built logic for Controller election using ZooKeeper. The Controller handles new topic creation and partition rebalancing when a broker crashes.
 - **Data Flow & Replication**: Implemented request handlers for Produce, Fetch, and Metadata. Built active replication, where the Leader actively pushes copies of data to Follower brokers.
 
+## Day 4 Progress
+- **Client SDK**: Implemented `SimpleKafkaClient.java` to handle raw socket connections, binary protocol encoding/decoding, and metadata caching for external applications.
+- **Producer Wrapper**: Created `SimpleKafkaProducer.java` with auto-topic creation, random partition load balancing, and a simplified string-based API.
+- **Consumer Wrapper**: Built `SimpleKafkaConsumer.java` to fetch data continuously via a background daemon thread, track read offsets, and support manual seek functionality.
+
 ## How to Run (Coming Soon)
 *Instructions will be added as the core broker logic is implemented.*
