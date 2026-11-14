@@ -293,7 +293,9 @@ public class Partition {
 
     /**
      * Reads records from one segment into {@code out} until the segment ends or
-     * the byte budget runs out. Returns the remaining budget, or 0 to stop the read.
+     * the byte budget runs out. The first record of a read is always taken, even
+     * past the budget, so a consumer can make progress. Returns the remaining
+     * budget, or 0 or less to stop the read.
      */
     private int readSegment(SegmentInfo segment, long position, int budget, List<byte[]> out) throws IOException {
         try (RandomAccessFile logFile = new RandomAccessFile(segment.getLogPath(), "r");
@@ -309,7 +311,7 @@ public class Partition {
                 sizeBuffer.flip();
                 int messageSize = sizeBuffer.getInt();
 
-                if (messageSize > budget) {
+                if (messageSize + 4 > budget && !out.isEmpty()) {
                     return 0;
                 }
 
