@@ -348,6 +348,9 @@ public class SimpleKafkaBroker {
      * Participate in controller election
      */
     private void electController() {
+        if (!isRunning.get()) {
+            return;
+        }
         try {
             String controllerPath = "/controller";
 
