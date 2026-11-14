@@ -61,6 +61,17 @@ public final class TestCluster implements AutoCloseable {
         brokerPorts.add(port);
     }
 
+    public void stopBroker(int brokerId) {
+        brokers.get(brokerId - 1).stop();
+    }
+
+    /** Starts a new process for a stopped broker: same id, port and data directory. */
+    public void restartBroker(int brokerId) throws IOException {
+        SimpleKafkaBroker broker = new SimpleKafkaBroker(brokerId, "localhost", port(brokerId), zkFactory.getLocalPort());
+        broker.start();
+        brokers.set(brokerId - 1, broker);
+    }
+
     public int port(int brokerId) {
         return brokerPorts.get(brokerId - 1);
     }
