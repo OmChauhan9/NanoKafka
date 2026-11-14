@@ -17,6 +17,7 @@ class TopicNameTest {
 
     @Test
     void aTopicNameCannotEscapeTheDataDirectory() throws Exception {
+        Files.deleteIfExists(Path.of("escaped"));
         try (TestCluster cluster = TestCluster.start(1)) {
             assertFalse(cluster.client(1).createTopic("../../escaped", 1, (short) 1));
 
