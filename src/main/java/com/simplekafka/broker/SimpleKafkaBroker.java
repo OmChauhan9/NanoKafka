@@ -864,6 +864,11 @@ public class SimpleKafkaBroker {
     private void handleCreateTopicRequest(SocketChannel clientChannel, ByteBuffer buffer) throws IOException {
         String topic = Protocol.readString(buffer);
 
+        if (!isValidTopicName(topic)) {
+            Protocol.sendErrorResponse(clientChannel, "Invalid topic name");
+            return;
+        }
+
         int numPartitions = buffer.getInt();
         short replicationFactor = buffer.getShort();
 
@@ -944,6 +949,17 @@ public class SimpleKafkaBroker {
             return;
         }
         Protocol.writeFrame(clientChannel, response);
+    }
+
+    /**
+     * A topic name becomes a directory and a ZooKeeper path, so it may hold only letters, digits,
+     * dots, underscores and hyphens, at most 249 characters, and may not be "." or "..".
+     */
+    static boolean isValidTopicName(String topic) {
+        if (topic.isEmpty() || topic.length() > 249 || topic.equals(".") || topic.equals("..")) {
+            return false;
+        }
+        return topic.codePoints().allMatch(c -> Character.isLetterOrDigit(c) || c == '.' || c == '_' || c == '-');
     }
 
     /**
