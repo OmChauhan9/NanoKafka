@@ -61,6 +61,10 @@ public final class TestCluster implements AutoCloseable {
         brokerPorts.add(port);
     }
 
+    public int zkPort() {
+        return zkFactory.getLocalPort();
+    }
+
     public int port(int brokerId) {
         return brokerPorts.get(brokerId - 1);
     }
