@@ -231,9 +231,6 @@ public class SimpleKafkaBroker {
             // Start controller election process
             electController();
 
-            // Load existing topics
-            loadTopics();
-
             // Accept client connections
             executor.submit(this::acceptConnections);
         }
@@ -277,6 +274,10 @@ public class SimpleKafkaBroker {
     private void registerWithZookeeper() {
         try {
             zkClient.connect();
+
+            // The broker watch below can elect this broker, and its rebalance only sees loaded topics.
+            loadTopics();
+
             createBrokerNode();
 
             // Add broker info to local metadata
