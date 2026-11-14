@@ -3,9 +3,11 @@ package com.simplekafka.broker;
 import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.ProtocolException;
 import java.nio.ByteBuffer;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -62,22 +64,8 @@ public class SimpleKafkaBroker {
             return;
 
         executor.submit(() -> {
-            try (SocketChannel brokerChannel = SocketChannel.open()) {
-                brokerChannel.connect(new InetSocketAddress(broker.getHost(), broker.getPort()));
-
-                // Prepare notification
-                ByteBuffer request = ByteBuffer.allocate(3 + topic.length());
-                request.put(Protocol.TOPIC_NOTIFICATION);
-                request.putShort((short) topic.length());
-                request.put(topic.getBytes());
-                request.flip();
-
-                // Send notification
-                brokerChannel.write(request);
-
-                // Read acknowledgment
-                ByteBuffer response = ByteBuffer.allocate(1);
-                brokerChannel.read(response);
+            try {
+                Protocol.call(broker.getHost(), broker.getPort(), Protocol.encodeTopicNotification(topic));
             } catch (IOException e) {
                 LOGGER.log(Level.WARNING, "Failed to notify broker " + brokerId + " about topic creation", e);
             }
@@ -88,10 +76,7 @@ public class SimpleKafkaBroker {
      * Handle topic notification from controller
      */
     private void handleTopicNotification(SocketChannel clientChannel, ByteBuffer buffer) throws IOException {
-        short topicLength = buffer.getShort();
-        byte[] topicBytes = new byte[topicLength];
-        buffer.get(topicBytes);
-        String topic = new String(topicBytes);
+        String topic = Protocol.readString(buffer);
 
         LOGGER.info("Received topic notification for: " + topic);
 
@@ -103,7 +88,7 @@ public class SimpleKafkaBroker {
             ByteBuffer response = ByteBuffer.allocate(1);
             response.put((byte) 0); // Acknowledgment
             response.flip();
-            clientChannel.write(response);
+            Protocol.writeFrame(clientChannel, response);
         } catch (Exception e) {
             LOGGER.log(Level.SEVERE, "Failed to load topic: " + topic, e);
 
@@ -111,7 +96,7 @@ public class SimpleKafkaBroker {
             ByteBuffer response = ByteBuffer.allocate(1);
             response.put((byte) 1); // Error
             response.flip();
-            clientChannel.write(response);
+            Protocol.writeFrame(clientChannel, response);
         }
     }
 
@@ -259,7 +244,7 @@ public class SimpleKafkaBroker {
                 }
 
                 // Shut down executor
-                executor.shutdown();
+                executor.shutdownNow();
                 executor.awaitTermination(5, TimeUnit.SECONDS);
 
                 // Close ZooKeeper connection
@@ -494,7 +479,6 @@ public class SimpleKafkaBroker {
             try {
                 SocketChannel clientChannel = serverChannel.accept();
                 if (clientChannel != null) {
-                    clientChannel.configureBlocking(false);
                     LOGGER.info("Accepted connection from " + clientChannel.getRemoteAddress());
 
                     // Handle client connection in a separate thread
@@ -514,36 +498,23 @@ public class SimpleKafkaBroker {
      * Handle client connection
      */
     private void handleClient(SocketChannel clientChannel) {
-        try {
-            ByteBuffer buffer = ByteBuffer.allocate(1024);
-
-            while (clientChannel.isOpen() && isRunning.get()) {
-                buffer.clear();
-                int bytesRead = clientChannel.read(buffer);
-
-                if (bytesRead > 0) {
-                    buffer.flip();
-                    // Process the message based on protocol
-                    processClientMessage(clientChannel, buffer);
-                } else if (bytesRead < 0) {
-                    // Connection closed by client
-                    clientChannel.close();
-                    break;
+        try (clientChannel) {
+            while (true) {
+                ByteBuffer request;
+                try {
+                    request = Protocol.readFrame(clientChannel);
+                } catch (ProtocolException e) {
+                    Protocol.sendErrorResponse(clientChannel, e.getMessage());
+                    return;
                 }
-
-                Thread.sleep(50); // Small pause to prevent CPU spin
+                if (request == null) {
+                    return;
+                }
+                processClientMessage(clientChannel, request);
             }
         } catch (Exception e) {
             if (isRunning.get()) {
                 LOGGER.log(Level.SEVERE, "Error handling client", e);
-            }
-        } finally {
-            try {
-                if (clientChannel.isOpen()) {
-                    clientChannel.close();
-                }
-            } catch (IOException e) {
-                LOGGER.log(Level.WARNING, "Error closing client channel", e);
             }
         }
     }
@@ -583,10 +554,7 @@ public class SimpleKafkaBroker {
      * Handle produce request from client
      */
     private void handleProduceRequest(SocketChannel clientChannel, ByteBuffer buffer) throws IOException {
-        short topicLength = buffer.getShort();
-        byte[] topicBytes = new byte[topicLength];
-        buffer.get(topicBytes);
-        String topic = new String(topicBytes);
+        String topic = Protocol.readString(buffer);
 
         int partition = buffer.getInt();
         int messageSize = buffer.getInt();
@@ -636,7 +604,7 @@ public class SimpleKafkaBroker {
         response.putLong(offset);
         response.put((byte) (offset > -1 ? 0 : 1)); // 0 = success, 1 = error
         response.flip();
-        clientChannel.write(response);
+        Protocol.writeFrame(clientChannel, response);
     }
 
     /**
@@ -650,33 +618,16 @@ public class SimpleKafkaBroker {
             return;
         }
 
-        try (SocketChannel leaderChannel = SocketChannel.open()) {
-            leaderChannel.connect(new InetSocketAddress(leader.getHost(), leader.getPort()));
-
-            // Prepare forwarded produce request
-            ByteBuffer request = ByteBuffer.allocate(9 + topic.length() + message.length);
-            request.put(Protocol.PRODUCE);
-            request.putShort((short) topic.length());
-            request.put(topic.getBytes());
-            request.putInt(partition);
-            request.putInt(message.length);
-            request.put(message);
-            request.flip();
-
-            // Send request to leader
-            leaderChannel.write(request);
-
-            // Read response from leader
-            ByteBuffer response = ByteBuffer.allocate(10);
-            leaderChannel.read(response);
-            response.flip();
-
-            // Forward leader's response back to client
-            clientChannel.write(response);
+        ByteBuffer response;
+        try {
+            response = Protocol.call(leader.getHost(), leader.getPort(),
+                    Protocol.encodeProduceRequest(topic, partition, message));
         } catch (IOException e) {
             LOGGER.log(Level.SEVERE, "Failed to forward produce request to leader", e);
             Protocol.sendErrorResponse(clientChannel, "Failed to forward to leader");
+            return;
         }
+        Protocol.writeFrame(clientChannel, response);
     }
 
     /**
@@ -692,29 +643,9 @@ public class SimpleKafkaBroker {
                 continue;
 
             executor.submit(() -> {
-                try (SocketChannel followerChannel = SocketChannel.open()) {
-                    followerChannel.connect(new InetSocketAddress(follower.getHost(), follower.getPort()));
-
-                    // Prepare replication request
-                    ByteBuffer request = ByteBuffer.allocate(17 + topic.length() + message.length);
-                    request.put(Protocol.REPLICATE);
-                    request.putShort((short) topic.length());
-                    request.put(topic.getBytes());
-                    request.putInt(partition.getId());
-                    request.putLong(offset);
-                    request.putInt(message.length);
-                    request.put(message);
-                    request.flip();
-
-                    // Send request to follower
-                    followerChannel.write(request);
-
-                    // Read acknowledgment
-                    ByteBuffer response = ByteBuffer.allocate(1);
-                    followerChannel.read(response);
-                    response.flip();
-
-                    byte ack = response.get();
+                try {
+                    byte ack = Protocol.call(follower.getHost(), follower.getPort(),
+                            Protocol.encodeReplicateRequest(topic, partition.getId(), offset, message)).get();
                     LOGGER.info("Replication to follower " + followerId + " " +
                             (ack == Protocol.REPLICATE_ACK ? "succeeded" : "failed"));
                 } catch (IOException e) {
@@ -728,10 +659,7 @@ public class SimpleKafkaBroker {
      * Handle replication request from leader
      */
     private void handleReplicateRequest(SocketChannel clientChannel, ByteBuffer buffer) throws IOException {
-        short topicLength = buffer.getShort();
-        byte[] topicBytes = new byte[topicLength];
-        buffer.get(topicBytes);
-        String topic = new String(topicBytes);
+        String topic = Protocol.readString(buffer);
 
         int partitionId = buffer.getInt();
         long offset = buffer.getLong();
@@ -746,7 +674,7 @@ public class SimpleKafkaBroker {
             ByteBuffer response = ByteBuffer.allocate(1);
             response.put((byte) 0); // Failed
             response.flip();
-            clientChannel.write(response);
+            Protocol.writeFrame(clientChannel, response);
             return;
         }
 
@@ -765,7 +693,7 @@ public class SimpleKafkaBroker {
             ByteBuffer response = ByteBuffer.allocate(1);
             response.put((byte) 0); // Failed
             response.flip();
-            clientChannel.write(response);
+            Protocol.writeFrame(clientChannel, response);
             return;
         }
 
@@ -776,17 +704,14 @@ public class SimpleKafkaBroker {
         ByteBuffer response = ByteBuffer.allocate(1);
         response.put(Protocol.REPLICATE_ACK);
         response.flip();
-        clientChannel.write(response);
+        Protocol.writeFrame(clientChannel, response);
     }
 
     /**
      * Handle fetch request from client
      */
     private void handleFetchRequest(SocketChannel clientChannel, ByteBuffer buffer) throws IOException {
-        short topicLength = buffer.getShort();
-        byte[] topicBytes = new byte[topicLength];
-        buffer.get(topicBytes);
-        String topic = new String(topicBytes);
+        String topic = Protocol.readString(buffer);
 
         int partition = buffer.getInt();
         long offset = buffer.getLong();
@@ -824,7 +749,7 @@ public class SimpleKafkaBroker {
             response.put(Protocol.FETCH_RESPONSE);
             response.putInt(0); // 0 messages
             response.flip();
-            clientChannel.write(response);
+            Protocol.writeFrame(clientChannel, response);
             return;
         }
 
@@ -850,7 +775,7 @@ public class SimpleKafkaBroker {
         }
 
         response.flip();
-        clientChannel.write(response);
+        Protocol.writeFrame(clientChannel, response);
     }
 
     /**
@@ -862,7 +787,7 @@ public class SimpleKafkaBroker {
 
         // Calculate size for topics metadata
         for (Map.Entry<String, List<Partition>> entry : topics.entrySet()) {
-            size += 6 + entry.getKey().length(); // 2 bytes for length, string, 4 bytes for partition count
+            size += 6 + entry.getKey().getBytes(StandardCharsets.UTF_8).length; // 2 bytes for length, string, 4 bytes for partition count
 
             // Add size for each partition
             size += entry.getValue().size() * 12; // 4 bytes for id, 4 bytes for leader, 4 bytes for follower count
@@ -879,7 +804,7 @@ public class SimpleKafkaBroker {
 
         // Add estimated size for broker hostnames
         for (BrokerInfo broker : clusterMetadata.values()) {
-            size += broker.getHost().length();
+            size += broker.getHost().getBytes(StandardCharsets.UTF_8).length;
         }
 
         ByteBuffer response = ByteBuffer.allocate(size);
@@ -889,8 +814,9 @@ public class SimpleKafkaBroker {
         response.putInt(clusterMetadata.size());
         for (BrokerInfo broker : clusterMetadata.values()) {
             response.putInt(broker.getId());
-            response.putShort((short) broker.getHost().length());
-            response.put(broker.getHost().getBytes());
+            byte[] host = broker.getHost().getBytes(StandardCharsets.UTF_8);
+            response.putShort((short) host.length);
+            response.put(host);
             response.putInt(broker.getPort());
         }
 
@@ -900,8 +826,9 @@ public class SimpleKafkaBroker {
             String topic = entry.getKey();
             List<Partition> partitions = entry.getValue();
 
-            response.putShort((short) topic.length());
-            response.put(topic.getBytes());
+            byte[] topicBytes = topic.getBytes(StandardCharsets.UTF_8);
+            response.putShort((short) topicBytes.length);
+            response.put(topicBytes);
             response.putInt(partitions.size());
 
             for (Partition partition : partitions) {
@@ -917,17 +844,14 @@ public class SimpleKafkaBroker {
         }
 
         response.flip();
-        clientChannel.write(response);
+        Protocol.writeFrame(clientChannel, response);
     }
 
     /**
      * Handle create topic request from client
      */
     private void handleCreateTopicRequest(SocketChannel clientChannel, ByteBuffer buffer) throws IOException {
-        short topicLength = buffer.getShort();
-        byte[] topicBytes = new byte[topicLength];
-        buffer.get(topicBytes);
-        String topic = new String(topicBytes);
+        String topic = Protocol.readString(buffer);
 
         int numPartitions = buffer.getInt();
         short replicationFactor = buffer.getShort();
@@ -958,7 +882,7 @@ public class SimpleKafkaBroker {
             response.put(Protocol.CREATE_TOPIC_RESPONSE);
             response.put((byte) 0); // 0 = success
             response.flip();
-            clientChannel.write(response);
+            Protocol.writeFrame(clientChannel, response);
         } else {
             // Forward to controller
             forwardCreateTopicToController(clientChannel, topic, numPartitions, replicationFactor);
@@ -987,32 +911,16 @@ public class SimpleKafkaBroker {
             return;
         }
 
-        try (SocketChannel controllerChannel = SocketChannel.open()) {
-            controllerChannel.connect(new InetSocketAddress(controller.getHost(), controller.getPort()));
-
-            // Prepare forwarded create topic request
-            ByteBuffer request = ByteBuffer.allocate(9 + topic.length());
-            request.put(Protocol.CREATE_TOPIC);
-            request.putShort((short) topic.length());
-            request.put(topic.getBytes());
-            request.putInt(numPartitions);
-            request.putShort(replicationFactor);
-            request.flip();
-
-            // Send request to controller
-            controllerChannel.write(request);
-
-            // Read response from controller
-            ByteBuffer response = ByteBuffer.allocate(2);
-            controllerChannel.read(response);
-            response.flip();
-
-            // Forward controller's response back to client
-            clientChannel.write(response);
+        ByteBuffer response;
+        try {
+            response = Protocol.call(controller.getHost(), controller.getPort(),
+                    Protocol.encodeCreateTopicRequest(topic, numPartitions, replicationFactor));
         } catch (IOException e) {
             LOGGER.log(Level.SEVERE, "Failed to forward create topic request to controller", e);
             Protocol.sendErrorResponse(clientChannel, "Failed to forward to controller");
+            return;
         }
+        Protocol.writeFrame(clientChannel, response);
     }
 
     /**
