@@ -981,6 +981,12 @@ public class SimpleKafkaBroker {
             return;
         }
 
+        // This broker is not the controller, so a /controller naming it is left by its own dead session.
+        if (controllerId == brokerId) {
+            Protocol.sendErrorResponse(clientChannel, "Controller not available");
+            return;
+        }
+
         BrokerInfo controller = clusterMetadata.get(controllerId);
         if (controller == null) {
             Protocol.sendErrorResponse(clientChannel, "Controller broker not available");
