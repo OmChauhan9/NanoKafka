@@ -1,5 +1,7 @@
 # Build Your Own Kafka
 
+[![CI](https://github.com/OmChauhan9/NanoKafka/actions/workflows/ci.yml/badge.svg)](https://github.com/OmChauhan9/NanoKafka/actions/workflows/ci.yml)
+
 A simplified, educational implementation of a Kafka-like distributed streaming platform built from scratch in Java.
 
 The code is adapted from the [Build Your Own Kafka](https://github.com/buildthingsuseful/build-your-own-kafka) tutorial by Raghavendra Nandagopal, used under the MIT License. See [LICENSE](LICENSE).
