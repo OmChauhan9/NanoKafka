@@ -5,7 +5,6 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.nio.ByteBuffer;
-import java.nio.channels.SocketChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -22,6 +21,7 @@ import org.apache.zookeeper.ZooKeeper;
 import org.apache.zookeeper.server.ServerCnxnFactory;
 import org.apache.zookeeper.server.ZooKeeperServer;
 
+import com.simplekafka.broker.Protocol;
 import com.simplekafka.broker.SimpleKafkaBroker;
 import com.simplekafka.client.SimpleKafkaClient;
 
@@ -67,6 +67,10 @@ public final class TestCluster implements AutoCloseable {
         brokerPorts.add(port);
     }
 
+    public int zkPort() {
+        return zkFactory.getLocalPort();
+    }
+
     public void restartBroker(int brokerId) throws IOException {
         SimpleKafkaBroker broker = new SimpleKafkaBroker(brokerId, "localhost", port(brokerId), zkFactory.getLocalPort());
         broker.start();
@@ -100,13 +104,7 @@ public final class TestCluster implements AutoCloseable {
 
     /** Sends one raw request to one broker, bypassing the client's leader routing. */
     public ByteBuffer request(int brokerId, ByteBuffer request) throws IOException {
-        try (SocketChannel channel = SocketChannel.open(new InetSocketAddress("localhost", port(brokerId)))) {
-            channel.write(request);
-            ByteBuffer response = ByteBuffer.allocate(64 * 1024);
-            channel.read(response);
-            response.flip();
-            return response;
-        }
+        return Protocol.call("localhost", port(brokerId), request);
     }
 
     public void awaitTopicEverywhere(String topic) {

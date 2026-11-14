@@ -2,9 +2,7 @@ package com.simplekafka.client;
 
 import java.io.IOException;
 import java.net.ConnectException;
-import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
-import java.nio.channels.SocketChannel;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -22,7 +20,6 @@ import com.simplekafka.broker.Protocol;
  */
 public class SimpleKafkaClient {
     private static final Logger LOGGER = Logger.getLogger(SimpleKafkaClient.class.getName());
-    private static final int DEFAULT_BUFFER_SIZE = 4096;
 
     private final String bootstrapBroker;
     private final int bootstrapPort;
@@ -55,53 +52,36 @@ public class SimpleKafkaClient {
      * Refresh metadata about brokers and topics
      */
     public void refreshMetadata() throws IOException {
-        try (SocketChannel channel = SocketChannel.open()) {
-            channel.connect(new InetSocketAddress(bootstrapBroker, bootstrapPort));
+        ByteBuffer response = Protocol.call(bootstrapBroker, bootstrapPort, Protocol.encodeMetadataRequest());
+        Protocol.MetadataResult result = Protocol.decodeMetadataResponse(response);
 
-            // Request metadata
-            ByteBuffer request = Protocol.encodeMetadataRequest();
-            channel.write(request);
-
-            // Read response
-            ByteBuffer response = ByteBuffer.allocate(DEFAULT_BUFFER_SIZE);
-            int bytesRead = channel.read(response);
-            if (bytesRead <= 0) {
-                throw new IOException("No data received from broker");
-            }
-
-            response.flip();
-
-            // Parse response
-            Protocol.MetadataResult result = Protocol.decodeMetadataResponse(response);
-
-            if (!result.isSuccess()) {
-                throw new IOException("Failed to fetch metadata: " + result.getError());
-            }
-
-            // Update broker information
-            brokers.clear();
-            for (BrokerInfo broker : result.getBrokers()) {
-                brokers.put(broker.getId(), new BrokerInfo(broker.getId(), broker.getHost(), broker.getPort()));
-            }
-
-            // Update topic metadata
-            topicMetadata.clear();
-            for (Protocol.TopicMetadata topic : result.getTopics()) {
-                List<PartitionInfo> partitions = new ArrayList<>();
-
-                for (Protocol.PartitionMetadata partition : topic.getPartitions()) {
-                    partitions.add(new PartitionInfo(
-                            partition.getId(),
-                            partition.getLeader(),
-                            partition.getReplicas()));
-                }
-
-                topicMetadata.put(topic.getName(), new TopicMetadata(topic.getName(), partitions));
-            }
-
-            LOGGER.info("Metadata refreshed: " + brokers.size() + " brokers, " +
-                    topicMetadata.size() + " topics");
+        if (!result.isSuccess()) {
+            throw new IOException("Failed to fetch metadata: " + result.getError());
         }
+
+        // Update broker information
+        brokers.clear();
+        for (BrokerInfo broker : result.getBrokers()) {
+            brokers.put(broker.getId(), new BrokerInfo(broker.getId(), broker.getHost(), broker.getPort()));
+        }
+
+        // Update topic metadata
+        topicMetadata.clear();
+        for (Protocol.TopicMetadata topic : result.getTopics()) {
+            List<PartitionInfo> partitions = new ArrayList<>();
+
+            for (Protocol.PartitionMetadata partition : topic.getPartitions()) {
+                partitions.add(new PartitionInfo(
+                        partition.getId(),
+                        partition.getLeader(),
+                        partition.getReplicas()));
+            }
+
+            topicMetadata.put(topic.getName(), new TopicMetadata(topic.getName(), partitions));
+        }
+
+        LOGGER.info("Metadata refreshed: " + brokers.size() + " brokers, " +
+                topicMetadata.size() + " topics");
     }
 
     /**
@@ -118,45 +98,28 @@ public class SimpleKafkaClient {
 
         BrokerInfo broker = brokers.values().iterator().next();
 
-        try (SocketChannel channel = SocketChannel.open()) {
-            channel.connect(new InetSocketAddress(broker.getHost(), broker.getPort()));
+        ByteBuffer response = Protocol.call(broker.getHost(), broker.getPort(),
+                Protocol.encodeCreateTopicRequest(topic, numPartitions, replicationFactor));
 
-            // Send create topic request
-            ByteBuffer request = Protocol.encodeCreateTopicRequest(topic, numPartitions, replicationFactor);
-            channel.write(request);
-
-            // Read response
-            ByteBuffer response = ByteBuffer.allocate(DEFAULT_BUFFER_SIZE);
-            int bytesRead = channel.read(response);
-            if (bytesRead <= 0) {
-                throw new IOException("No data received from broker");
+        byte responseType = response.get();
+        if (responseType != Protocol.CREATE_TOPIC_RESPONSE) {
+            if (responseType == Protocol.ERROR_RESPONSE) {
+                String error = Protocol.readString(response);
+                LOGGER.warning("Error creating topic: " + error);
+                return false;
             }
-
-            response.flip();
-
-            byte responseType = response.get();
-            if (responseType != Protocol.CREATE_TOPIC_RESPONSE) {
-                if (responseType == Protocol.ERROR_RESPONSE) {
-                    short errorLength = response.getShort();
-                    byte[] errorBytes = new byte[errorLength];
-                    response.get(errorBytes);
-                    String error = new String(errorBytes);
-                    LOGGER.warning("Error creating topic: " + error);
-                    return false;
-                }
-                throw new IOException("Invalid create topic response type: " + responseType);
-            }
-
-            byte status = response.get();
-            boolean success = status == 0;
-
-            if (success) {
-                // Refresh metadata to include new topic
-                refreshMetadata();
-            }
-
-            return success;
+            throw new IOException("Invalid create topic response type: " + responseType);
         }
+
+        byte status = response.get();
+        boolean success = status == 0;
+
+        if (success) {
+            // Refresh metadata to include new topic
+            refreshMetadata();
+        }
+
+        return success;
     }
 
     /**
@@ -209,30 +172,15 @@ public class SimpleKafkaClient {
         }
 
         // Send to leader
-        try (SocketChannel channel = SocketChannel.open()) {
-            channel.connect(new InetSocketAddress(leader.getHost(), leader.getPort()));
+        ByteBuffer response = Protocol.call(leader.getHost(), leader.getPort(),
+                Protocol.encodeProduceRequest(topic, partition, message));
+        Protocol.ProduceResult result = Protocol.decodeProduceResponse(response);
 
-            // Send produce request
-            ByteBuffer request = Protocol.encodeProduceRequest(topic, partition, message);
-            channel.write(request);
-
-            // Read response
-            ByteBuffer response = ByteBuffer.allocate(DEFAULT_BUFFER_SIZE);
-            int bytesRead = channel.read(response);
-            if (bytesRead <= 0) {
-                throw new IOException("No data received from broker");
-            }
-
-            response.flip();
-
-            Protocol.ProduceResult result = Protocol.decodeProduceResponse(response);
-
-            if (!result.isSuccess()) {
-                throw new IOException("Failed to produce message: " + result.getError());
-            }
-
-            return result.getOffset();
+        if (!result.isSuccess()) {
+            throw new IOException("Failed to produce message: " + result.getError());
         }
+
+        return result.getOffset();
     }
 
     /**
@@ -284,35 +232,20 @@ public class SimpleKafkaClient {
         }
 
         // Fetch from leader
-        try (SocketChannel channel = SocketChannel.open()) {
-            channel.connect(new InetSocketAddress(leader.getHost(), leader.getPort()));
+        ByteBuffer response = Protocol.call(leader.getHost(), leader.getPort(),
+                Protocol.encodeFetchRequest(topic, partition, offset, maxBytes));
+        Protocol.FetchResult result = Protocol.decodeFetchResponse(response);
 
-            // Send fetch request
-            ByteBuffer request = Protocol.encodeFetchRequest(topic, partition, offset, maxBytes);
-            channel.write(request);
-
-            // Read response
-            ByteBuffer response = ByteBuffer.allocate(DEFAULT_BUFFER_SIZE);
-            int bytesRead = channel.read(response);
-            if (bytesRead <= 0) {
-                throw new IOException("No data received from broker");
-            }
-
-            response.flip();
-
-            Protocol.FetchResult result = Protocol.decodeFetchResponse(response);
-
-            if (!result.isSuccess()) {
-                throw new IOException("Failed to fetch messages: " + result.getError());
-            }
-
-            List<byte[]> messages = new ArrayList<>();
-            for (byte[] msg : result.getMessages()) {
-                messages.add(msg);
-            }
-
-            return messages;
+        if (!result.isSuccess()) {
+            throw new IOException("Failed to fetch messages: " + result.getError());
         }
+
+        List<byte[]> messages = new ArrayList<>();
+        for (byte[] msg : result.getMessages()) {
+            messages.add(msg);
+        }
+
+        return messages;
     }
 
     /**
