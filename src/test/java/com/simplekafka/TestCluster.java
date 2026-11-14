@@ -10,9 +10,13 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import java.util.stream.Stream;
 
+import org.apache.zookeeper.Watcher;
+import org.apache.zookeeper.ZooKeeper;
 import org.apache.zookeeper.server.ServerCnxnFactory;
 import org.apache.zookeeper.server.ZooKeeperServer;
 
@@ -63,6 +67,21 @@ public final class TestCluster implements AutoCloseable {
 
     public int port(int brokerId) {
         return brokerPorts.get(brokerId - 1);
+    }
+
+    /** A raw ZooKeeper session, separate from every broker's, with the server's minimum session timeout. */
+    public ZooKeeper openZooKeeper() throws IOException, InterruptedException {
+        CountDownLatch connected = new CountDownLatch(1);
+        ZooKeeper zk = new ZooKeeper("localhost:" + zkFactory.getLocalPort(), 4000, event -> {
+            if (event.getState() == Watcher.Event.KeeperState.SyncConnected) {
+                connected.countDown();
+            }
+        });
+        if (!connected.await(10, TimeUnit.SECONDS)) {
+            zk.close();
+            throw new IOException("could not connect to the embedded ZooKeeper");
+        }
+        return zk;
     }
 
     public SimpleKafkaClient client(int brokerId) throws IOException {
