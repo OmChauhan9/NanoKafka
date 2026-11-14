@@ -117,6 +117,10 @@ public final class TestCluster implements AutoCloseable {
         throw new AssertionError("timed out waiting for " + what);
     }
 
+    public void stopBroker(int brokerId) {
+        brokers.get(brokerId - 1).stop();
+    }
+
     @Override
     public void close() {
         for (SimpleKafkaBroker broker : brokers) {
