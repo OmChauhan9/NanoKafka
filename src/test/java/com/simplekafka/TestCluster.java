@@ -42,7 +42,7 @@ public final class TestCluster implements AutoCloseable {
         deleteRecursively(Path.of("data"));
         zkDir = Files.createTempDirectory("nanokafka-zk");
         zkServer = new ZooKeeperServer(zkDir.toFile(), zkDir.toFile(), 2000);
-        zkFactory = ServerCnxnFactory.createFactory(new InetSocketAddress("localhost", 0), 100);
+        zkFactory = ServerCnxnFactory.createFactory(new InetSocketAddress(0), 100);
         zkFactory.startup(zkServer);
     }
 
