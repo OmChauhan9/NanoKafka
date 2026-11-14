@@ -1,6 +1,9 @@
 package com.simplekafka.broker;
 
+import java.io.BufferedOutputStream;
+import java.io.DataOutputStream;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
@@ -60,21 +63,22 @@ public class Partition {
                     long baseOffset = Long.parseLong(baseName);
 
                     File indexFile = new File(baseDir, baseName + INDEX_SUFFIX);
-                    if (indexFile.exists()) {
-                        SegmentInfo segment = new SegmentInfo(baseOffset, file.getAbsolutePath(),
-                                indexFile.getAbsolutePath());
-                        segments.add(segment);
-                    }
+                    SegmentInfo segment = new SegmentInfo(baseOffset, file.getAbsolutePath(),
+                            indexFile.getAbsolutePath());
+                    segments.add(segment);
                 }
 
                 // Sort segments by base offset
                 segments.sort((s1, s2) -> Long.compare(s1.getBaseOffset(), s2.getBaseOffset()));
 
-                // Determine next offset from the last segment
-                if (!segments.isEmpty()) {
-                    SegmentInfo lastSegment = segments.get(segments.size() - 1);
-                    nextOffset.set(lastSegment.getBaseOffset() + countMessagesInSegment(lastSegment));
+                SegmentInfo lastSegment = segments.get(segments.size() - 1);
+                for (SegmentInfo segment : segments) {
+                    if (segment != lastSegment && !new File(segment.getIndexPath()).exists()) {
+                        recoverSegment(segment);
+                    }
                 }
+                // Only the active segment can hold a write cut short by a crash.
+                nextOffset.set(lastSegment.getBaseOffset() + recoverSegment(lastSegment));
             }
 
             // Create a new segment if none exists
@@ -94,30 +98,41 @@ public class Partition {
     }
 
     /**
-     * Count the number of messages in a segment
+     * Rebuilds a segment's index from its log, truncating the log after the last
+     * complete record. Returns the number of complete records.
      */
-    private long countMessagesInSegment(SegmentInfo segment) throws IOException {
+    private long recoverSegment(SegmentInfo segment) throws IOException {
         long count = 0;
-        try (RandomAccessFile logFile = new RandomAccessFile(segment.getLogPath(), "r");
-                FileChannel logChannel = logFile.getChannel()) {
+        try (RandomAccessFile logFile = new RandomAccessFile(segment.getLogPath(), "rw");
+                FileChannel logChannel = logFile.getChannel();
+                DataOutputStream index = new DataOutputStream(
+                        new BufferedOutputStream(new FileOutputStream(segment.getIndexPath())))) {
+            long size = logChannel.size();
+            long position = 0;
+            ByteBuffer sizeBuffer = ByteBuffer.allocate(4);
 
-            ByteBuffer buffer = ByteBuffer.allocate(4); // Size field is 4 bytes
-
-            while (logChannel.position() < logChannel.size()) {
-                buffer.clear();
-                int bytesRead = logChannel.read(buffer);
-                if (bytesRead < 4)
+            while (position + 4 <= size) {
+                sizeBuffer.clear();
+                logChannel.read(sizeBuffer, position);
+                sizeBuffer.flip();
+                int messageSize = sizeBuffer.getInt();
+                if (messageSize < 0 || position + 4 + messageSize > size) {
                     break;
+                }
 
-                buffer.flip();
-                int messageSize = buffer.getInt();
-
-                // Skip the message
-                logChannel.position(logChannel.position() + messageSize);
+                index.writeLong(segment.getBaseOffset() + count);
+                index.writeLong(position);
+                position += 4 + messageSize;
                 count++;
             }
-        }
 
+            if (position < size) {
+                LOGGER.warning("Truncating " + (size - position) + " bytes of incomplete record from "
+                        + segment.getLogPath());
+                logChannel.truncate(position);
+                logChannel.force(true);
+            }
+        }
         return count;
     }
 
