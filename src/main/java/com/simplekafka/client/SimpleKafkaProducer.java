@@ -46,7 +46,8 @@ public class SimpleKafkaProducer {
         // Check if topic exists, create if not
         if (client.getTopicMetadata(topic) == null && createTopicIfNotExists) {
             LOGGER.info("Topic does not exist. Creating: " + topic);
-            boolean created = client.createTopic(topic, DEFAULT_PARTITIONS, DEFAULT_REPLICATION);
+            short replication = (short) Math.min(DEFAULT_REPLICATION, client.getBrokers().size());
+            boolean created = client.createTopic(topic, DEFAULT_PARTITIONS, replication);
             if (!created) {
                 throw new IOException("Failed to create topic: " + topic);
             }
@@ -115,6 +116,7 @@ public class SimpleKafkaProducer {
             System.out.println("Producer finished sending messages");
         } catch (Exception e) {
             LOGGER.log(Level.SEVERE, "Producer error", e);
+            System.exit(1);
         }
     }
 }

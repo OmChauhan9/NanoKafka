@@ -4,15 +4,21 @@ import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
+import java.nio.ByteBuffer;
+import java.nio.channels.SocketChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import java.util.stream.Stream;
 
+import org.apache.zookeeper.Watcher;
+import org.apache.zookeeper.ZooKeeper;
 import org.apache.zookeeper.server.ServerCnxnFactory;
 import org.apache.zookeeper.server.ZooKeeperServer;
 
@@ -65,10 +71,36 @@ public final class TestCluster implements AutoCloseable {
         return brokerPorts.get(brokerId - 1);
     }
 
+    /** A raw ZooKeeper session, separate from every broker's, with the server's minimum session timeout. */
+    public ZooKeeper openZooKeeper() throws IOException, InterruptedException {
+        CountDownLatch connected = new CountDownLatch(1);
+        ZooKeeper zk = new ZooKeeper("localhost:" + zkFactory.getLocalPort(), 4000, event -> {
+            if (event.getState() == Watcher.Event.KeeperState.SyncConnected) {
+                connected.countDown();
+            }
+        });
+        if (!connected.await(10, TimeUnit.SECONDS)) {
+            zk.close();
+            throw new IOException("could not connect to the embedded ZooKeeper");
+        }
+        return zk;
+    }
+
     public SimpleKafkaClient client(int brokerId) throws IOException {
         SimpleKafkaClient client = new SimpleKafkaClient("localhost", port(brokerId));
         client.initialize();
         return client;
+    }
+
+    /** Sends one raw request to one broker, bypassing the client's leader routing. */
+    public ByteBuffer request(int brokerId, ByteBuffer request) throws IOException {
+        try (SocketChannel channel = SocketChannel.open(new InetSocketAddress("localhost", port(brokerId)))) {
+            channel.write(request);
+            ByteBuffer response = ByteBuffer.allocate(64 * 1024);
+            channel.read(response);
+            response.flip();
+            return response;
+        }
     }
 
     public void awaitTopicEverywhere(String topic) {
@@ -115,6 +147,10 @@ public final class TestCluster implements AutoCloseable {
             }
         }
         throw new AssertionError("timed out waiting for " + what);
+    }
+
+    public void stopBroker(int brokerId) {
+        brokers.get(brokerId - 1).stop();
     }
 
     @Override

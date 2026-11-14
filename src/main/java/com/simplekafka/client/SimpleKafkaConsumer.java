@@ -90,10 +90,11 @@ public class SimpleKafkaConsumer {
             consumerThread = new Thread(() -> {
                 try {
                     while (running.get()) {
-                        List<byte[]> messages = poll();
+                        List<byte[]> messages = client.fetch(topic, partition, currentOffset, MAX_BYTES);
 
                         for (byte[] message : messages) {
-                            handler.handle(message, currentOffset - messages.size() + messages.indexOf(message));
+                            handler.handle(message, currentOffset);
+                            currentOffset++;
                         }
 
                         // If no messages, wait a bit before polling again
