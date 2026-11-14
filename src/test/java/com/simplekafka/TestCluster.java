@@ -2,6 +2,7 @@ package com.simplekafka;
 
 import java.io.File;
 import java.io.IOException;
+import java.net.BindException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.nio.ByteBuffer;
@@ -60,11 +61,22 @@ public final class TestCluster implements AutoCloseable {
     }
 
     public void addBroker(int id) throws IOException {
-        int port = freePort();
-        SimpleKafkaBroker broker = new SimpleKafkaBroker(id, "localhost", port, zkFactory.getLocalPort());
-        broker.start();
-        brokers.add(broker);
-        brokerPorts.add(port);
+        // freePort() closes its socket before the broker binds, so another process can take the port in between.
+        for (int attempt = 1; ; attempt++) {
+            int port = freePort();
+            SimpleKafkaBroker broker = new SimpleKafkaBroker(id, "localhost", port, zkFactory.getLocalPort());
+            try {
+                broker.start();
+            } catch (BindException e) {
+                if (attempt == 5) {
+                    throw e;
+                }
+                continue;
+            }
+            brokers.add(broker);
+            brokerPorts.add(port);
+            return;
+        }
     }
 
     public int zkPort() {
