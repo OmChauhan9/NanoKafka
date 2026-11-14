@@ -14,6 +14,7 @@ public class SimpleKafkaConsumer {
     private static final Logger LOGGER = Logger.getLogger(SimpleKafkaConsumer.class.getName());
     private static final int MAX_BYTES = 1024 * 1024; // 1MB max fetch size
     private static final int POLL_INTERVAL_MS = 100;
+    private static final int RETRY_BACKOFF_MS = 500;
 
     private final SimpleKafkaClient client;
     private final String topic;
@@ -90,10 +91,20 @@ public class SimpleKafkaConsumer {
             consumerThread = new Thread(() -> {
                 try {
                     while (running.get()) {
-                        List<byte[]> messages = poll();
+                        List<byte[]> messages;
+                        try {
+                            messages = client.fetch(topic, partition, currentOffset, MAX_BYTES);
+                        } catch (IOException e) {
+                            if (running.get()) {
+                                LOGGER.warning("Fetch failed, retrying in " + RETRY_BACKOFF_MS + " ms: " + e);
+                            }
+                            Thread.sleep(RETRY_BACKOFF_MS);
+                            continue;
+                        }
 
                         for (byte[] message : messages) {
-                            handler.handle(message, currentOffset - messages.size() + messages.indexOf(message));
+                            handler.handle(message, currentOffset);
+                            currentOffset++;
                         }
 
                         // If no messages, wait a bit before polling again

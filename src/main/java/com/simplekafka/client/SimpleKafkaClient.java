@@ -1,6 +1,7 @@
 package com.simplekafka.client;
 
 import java.io.IOException;
+import java.net.ConnectException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -125,6 +126,17 @@ public class SimpleKafkaClient {
      * Produce a message to a topic-partition
      */
     public long send(String topic, int partition, byte[] message) throws IOException {
+        try {
+            return sendOnce(topic, partition, message);
+        } catch (ConnectException e) {
+            // Retry only when nothing reached the broker, so a retry cannot append twice.
+            LOGGER.warning("Leader unreachable, refreshing metadata and retrying: " + e);
+            refreshMetadata();
+            return sendOnce(topic, partition, message);
+        }
+    }
+
+    private long sendOnce(String topic, int partition, byte[] message) throws IOException {
         if (!topicMetadata.containsKey(topic)) {
             refreshMetadata();
             if (!topicMetadata.containsKey(topic)) {
@@ -175,6 +187,16 @@ public class SimpleKafkaClient {
      * Consume messages from a topic-partition
      */
     public List<byte[]> fetch(String topic, int partition, long offset, int maxBytes) throws IOException {
+        try {
+            return fetchOnce(topic, partition, offset, maxBytes);
+        } catch (IOException e) {
+            LOGGER.warning("Fetch failed, refreshing metadata and retrying: " + e);
+            refreshMetadata();
+            return fetchOnce(topic, partition, offset, maxBytes);
+        }
+    }
+
+    private List<byte[]> fetchOnce(String topic, int partition, long offset, int maxBytes) throws IOException {
         if (!topicMetadata.containsKey(topic)) {
             refreshMetadata();
             if (!topicMetadata.containsKey(topic)) {

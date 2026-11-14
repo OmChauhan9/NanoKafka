@@ -39,7 +39,7 @@ public class SimpleKafkaBroker {
         this.brokerHost = host;
         this.brokerPort = port;
         this.topics = new ConcurrentHashMap<>();
-        this.executor = Executors.newFixedThreadPool(10);
+        this.executor = Executors.newCachedThreadPool();
         this.serverChannel = ServerSocketChannel.open();
         this.isRunning = new AtomicBoolean(false);
         this.isController = new AtomicBoolean(false);
@@ -207,7 +207,6 @@ public class SimpleKafkaBroker {
         if (isRunning.compareAndSet(false, true)) {
             // Bind to socket
             serverChannel.socket().bind(new InetSocketAddress(brokerHost, brokerPort));
-            serverChannel.configureBlocking(false);
 
             LOGGER.info("SimpleKafka broker started on " + brokerHost + ":" + brokerPort);
 
@@ -216,9 +215,6 @@ public class SimpleKafkaBroker {
 
             // Start controller election process
             electController();
-
-            // Load existing topics
-            loadTopics();
 
             // Accept client connections
             executor.submit(this::acceptConnections);
@@ -263,9 +259,11 @@ public class SimpleKafkaBroker {
     private void registerWithZookeeper() {
         try {
             zkClient.connect();
-            String brokerPath = "/brokers/" + brokerId;
-            String brokerData = brokerHost + ":" + brokerPort;
-            zkClient.createEphemeralNode(brokerPath, brokerData);
+
+            // The broker watch below can elect this broker, and its rebalance only sees loaded topics.
+            loadTopics();
+
+            createBrokerNode();
 
             // Add broker info to local metadata
             BrokerInfo selfInfo = new BrokerInfo(brokerId, brokerHost, brokerPort);
@@ -281,10 +279,25 @@ public class SimpleKafkaBroker {
     }
 
     /**
+     * Create this broker's ephemeral node. Returns false while another session still holds it.
+     */
+    private boolean createBrokerNode() {
+        try {
+            return zkClient.createEphemeralNode("/brokers/" + brokerId, brokerHost + ":" + brokerPort);
+        } catch (Exception e) {
+            LOGGER.log(Level.WARNING, "Failed to create broker node", e);
+            return false;
+        }
+    }
+
+    /**
      * Handle changes in the broker list from ZooKeeper
      */
     private void onBrokersChanged(List<String> brokerIds) {
         LOGGER.info("Broker change detected. Current brokers: " + brokerIds);
+
+        // A node left by this broker's previous, dead session blocks registration until it expires.
+        boolean registered = brokerIds.contains(String.valueOf(brokerId)) || createBrokerNode();
 
         // Update cluster metadata
         for (String id : brokerIds) {
@@ -308,7 +321,7 @@ public class SimpleKafkaBroker {
         // Remove brokers that have disappeared
         List<Integer> toRemove = new ArrayList<>();
         for (Integer brokerId : clusterMetadata.keySet()) {
-            if (!brokerIds.contains(String.valueOf(brokerId))) {
+            if (brokerId != this.brokerId && !brokerIds.contains(String.valueOf(brokerId))) {
                 toRemove.add(brokerId);
             }
         }
@@ -319,7 +332,7 @@ public class SimpleKafkaBroker {
         }
 
         // Re-elect controller if needed
-        if (!brokerIds.contains(String.valueOf(brokerId)) && isController.get()) {
+        if (!registered && isController.get()) {
             isController.set(false);
             LOGGER.info("This broker is no longer in the cluster, giving up controller status");
         } else if (isController.get()) {
@@ -484,8 +497,6 @@ public class SimpleKafkaBroker {
                     // Handle client connection in a separate thread
                     executor.submit(() -> handleClient(clientChannel));
                 }
-
-                Thread.sleep(100); // Small pause to prevent CPU spin
             } catch (Exception e) {
                 if (isRunning.get()) {
                     LOGGER.log(Level.SEVERE, "Error accepting connection", e);
@@ -875,12 +886,18 @@ public class SimpleKafkaBroker {
 
         // As controller, create the topic
         if (isController.get()) {
-            createTopic(topic, numPartitions, replicationFactor);
+            boolean created;
+            synchronized (this) {
+                if (topics.containsKey(topic)) {
+                    Protocol.sendErrorResponse(clientChannel, "Topic already exists");
+                    return;
+                }
+                created = createTopic(topic, numPartitions, replicationFactor);
+            }
 
-            // Send success response
             ByteBuffer response = ByteBuffer.allocate(2);
             response.put(Protocol.CREATE_TOPIC_RESPONSE);
-            response.put((byte) 0); // 0 = success
+            response.put((byte) (created ? 0 : 1));
             response.flip();
             Protocol.writeFrame(clientChannel, response);
         } else {
@@ -901,6 +918,12 @@ public class SimpleKafkaBroker {
             controllerId = Integer.parseInt(controllerData);
         } catch (Exception e) {
             LOGGER.log(Level.SEVERE, "Failed to get controller info", e);
+            Protocol.sendErrorResponse(clientChannel, "Controller not available");
+            return;
+        }
+
+        // This broker is not the controller, so a /controller naming it is left by its own dead session.
+        if (controllerId == brokerId) {
             Protocol.sendErrorResponse(clientChannel, "Controller not available");
             return;
         }
@@ -926,10 +949,10 @@ public class SimpleKafkaBroker {
     /**
      * Create a new topic with the specified configuration
      */
-    private void createTopic(String topic, int numPartitions, short replicationFactor) {
+    private boolean createTopic(String topic, int numPartitions, short replicationFactor) {
         if (!isController.get()) {
             LOGGER.warning("Only the controller can create topics");
-            return;
+            return false;
         }
 
         try {
@@ -939,10 +962,12 @@ public class SimpleKafkaBroker {
 
             // Create topic in ZooKeeper
             String topicPath = "/topics/" + topic;
-            if (!zkClient.exists(topicPath)) {
-                zkClient.createPersistentNode(topicPath, "");
-                zkClient.createPersistentNode(topicPath + "/partitions", "");
+            if (zkClient.exists(topicPath)) {
+                LOGGER.warning("Topic already exists in ZooKeeper: " + topic);
+                return false;
             }
+            zkClient.createPersistentNode(topicPath, "");
+            zkClient.createPersistentNode(topicPath + "/partitions", "");
 
             // Create partitions
             List<Partition> partitions = new ArrayList<>();
@@ -991,8 +1016,10 @@ public class SimpleKafkaBroker {
                     notifyBrokerForTopicCreation(brokerId, topic);
                 }
             }
+            return true;
         } catch (Exception e) {
             LOGGER.log(Level.SEVERE, "Failed to create topic", e);
+            return false;
         }
     }
 }
