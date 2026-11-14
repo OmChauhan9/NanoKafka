@@ -108,6 +108,28 @@ class PartitionTest {
         }
     }
 
+    @Test
+    void readContinuesIntoTheNextSegment() {
+        Partition partition = new Partition(0, 1, List.of(), dir.toString());
+        for (int i = 0; i < 13; i++) {
+            partition.append(sized("m" + i, 100_000));
+        }
+
+        List<String> labels = strings(partition.readMessages(9, 1024 * 1024)).stream()
+                .map(m -> m.substring(0, m.indexOf(':')))
+                .collect(Collectors.toList());
+        assertEquals(List.of("m9", "m10", "m11", "m12"), labels);
+        partition.close();
+    }
+
+    static byte[] sized(String label, int size) {
+        StringBuilder s = new StringBuilder(label).append(':');
+        while (s.length() < size) {
+            s.append('x');
+        }
+        return bytes(s.toString());
+    }
+
     static byte[] bytes(String s) {
         return s.getBytes(StandardCharsets.UTF_8);
     }
