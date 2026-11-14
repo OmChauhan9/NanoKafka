@@ -37,7 +37,7 @@ public class SimpleKafkaBroker {
         this.brokerHost = host;
         this.brokerPort = port;
         this.topics = new ConcurrentHashMap<>();
-        this.executor = Executors.newFixedThreadPool(10);
+        this.executor = Executors.newCachedThreadPool();
         this.serverChannel = ServerSocketChannel.open();
         this.isRunning = new AtomicBoolean(false);
         this.isController = new AtomicBoolean(false);
@@ -222,7 +222,6 @@ public class SimpleKafkaBroker {
         if (isRunning.compareAndSet(false, true)) {
             // Bind to socket
             serverChannel.socket().bind(new InetSocketAddress(brokerHost, brokerPort));
-            serverChannel.configureBlocking(false);
 
             LOGGER.info("SimpleKafka broker started on " + brokerHost + ":" + brokerPort);
 
@@ -500,8 +499,6 @@ public class SimpleKafkaBroker {
                     // Handle client connection in a separate thread
                     executor.submit(() -> handleClient(clientChannel));
                 }
-
-                Thread.sleep(100); // Small pause to prevent CPU spin
             } catch (Exception e) {
                 if (isRunning.get()) {
                     LOGGER.log(Level.SEVERE, "Error accepting connection", e);
