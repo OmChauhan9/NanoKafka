@@ -67,6 +67,12 @@ public final class TestCluster implements AutoCloseable {
         brokerPorts.add(port);
     }
 
+    public void restartBroker(int brokerId) throws IOException {
+        SimpleKafkaBroker broker = new SimpleKafkaBroker(brokerId, "localhost", port(brokerId), zkFactory.getLocalPort());
+        broker.start();
+        brokers.set(brokerId - 1, broker);
+    }
+
     public int port(int brokerId) {
         return brokerPorts.get(brokerId - 1);
     }
