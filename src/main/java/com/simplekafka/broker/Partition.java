@@ -250,85 +250,22 @@ public class Partition {
     public List<byte[]> readMessages(long offset, int maxBytes) {
         lock.readLock().lock();
         List<byte[]> messages = new ArrayList<>();
-        int bytesRead = 0;
 
         try {
-            // Find the segment containing the offset
-            SegmentInfo targetSegment = findSegmentForOffset(offset);
-            if (targetSegment == null) {
+            SegmentInfo firstSegment = findSegmentForOffset(offset);
+            if (firstSegment == null) {
                 return messages;
             }
 
-            // Find the file position for the offset using the index
-            long position = findPositionForOffset(targetSegment, offset);
+            long position = findPositionForOffset(firstSegment, offset);
             if (position < 0) {
                 return messages;
             }
 
-            // Open the log file for reading
-            try (RandomAccessFile logFile = new RandomAccessFile(targetSegment.getLogPath(), "r");
-                    FileChannel logChannel = logFile.getChannel()) {
-
-                // Position at the correct spot
-                logChannel.position(position);
-
-                // Read messages until maxBytes is reached
-                ByteBuffer sizeBuffer = ByteBuffer.allocate(4);
-                long currentOffset = offset;
-
-                while (bytesRead < maxBytes && logChannel.position() < logChannel.size()) {
-                    // Read message size
-                    sizeBuffer.clear();
-                    int sizeRead = logChannel.read(sizeBuffer);
-                    if (sizeRead < 4)
-                        break;
-
-                    sizeBuffer.flip();
-                    int messageSize = sizeBuffer.getInt();
-
-                    // Check if adding this message would exceed maxBytes
-                    if (bytesRead + messageSize > maxBytes) {
-                        break;
-                    }
-
-                    // Read message data
-                    ByteBuffer messageBuffer = ByteBuffer.allocate(messageSize);
-                    int messageRead = logChannel.read(messageBuffer);
-
-                    if (messageRead < messageSize) {
-                        LOGGER.warning("Incomplete message read at offset " + currentOffset);
-                        break;
-                    }
-
-                    messageBuffer.flip();
-
-                    // Add message to result
-                    byte[] message = new byte[messageSize];
-                    messageBuffer.get(message);
-                    messages.add(message);
-
-                    // Update bytes read
-                    bytesRead += messageSize + 4; // message size + 4 bytes for size field
-                    currentOffset++;
-
-                    // If we're at the end of this segment, move to the next one
-                    if (logChannel.position() >= logChannel.size() && currentOffset < nextOffset.get()) {
-                        int nextSegmentIndex = segments.indexOf(targetSegment) + 1;
-                        if (nextSegmentIndex < segments.size()) {
-                            logChannel.close();
-                            logFile.close();
-
-                            targetSegment = segments.get(nextSegmentIndex);
-
-                            RandomAccessFile nextLogFile = new RandomAccessFile(targetSegment.getLogPath(), "r");
-                            FileChannel nextLogChannel = nextLogFile.getChannel();
-
-                            // Continue reading from the beginning of next segment
-                            position = 0;
-                            nextLogChannel.position(position);
-                        }
-                    }
-                }
+            int budget = maxBytes;
+            for (int i = segments.indexOf(firstSegment); i < segments.size() && budget > 0; i++) {
+                budget = readSegment(segments.get(i), position, budget, messages);
+                position = 0;
             }
         } catch (IOException e) {
             LOGGER.log(Level.SEVERE, "Failed to read messages from partition " + id, e);
@@ -337,6 +274,41 @@ public class Partition {
         }
 
         return messages;
+    }
+
+    /**
+     * Reads records from one segment into {@code out} until the segment ends or
+     * the byte budget runs out. Returns the remaining budget, or 0 to stop the read.
+     */
+    private int readSegment(SegmentInfo segment, long position, int budget, List<byte[]> out) throws IOException {
+        try (RandomAccessFile logFile = new RandomAccessFile(segment.getLogPath(), "r");
+                FileChannel logChannel = logFile.getChannel()) {
+            logChannel.position(position);
+            ByteBuffer sizeBuffer = ByteBuffer.allocate(4);
+
+            while (budget > 0 && logChannel.position() < logChannel.size()) {
+                sizeBuffer.clear();
+                if (logChannel.read(sizeBuffer) < 4) {
+                    return 0;
+                }
+                sizeBuffer.flip();
+                int messageSize = sizeBuffer.getInt();
+
+                if (messageSize > budget) {
+                    return 0;
+                }
+
+                ByteBuffer messageBuffer = ByteBuffer.allocate(messageSize);
+                if (logChannel.read(messageBuffer) < messageSize) {
+                    LOGGER.warning("Incomplete message read in partition " + id);
+                    return 0;
+                }
+
+                out.add(messageBuffer.array());
+                budget -= messageSize + 4;
+            }
+            return budget;
+        }
     }
 
     /**
