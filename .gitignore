@@ -16,3 +16,9 @@ target/
 # Personal Documentation
 Project_Documentation.md
 *.docx
+
+# Broker data written when you run the README steps
+data/
+
+# Written by maven-shade-plugin during package
+dependency-reduced-pom.xml

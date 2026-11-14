@@ -15,6 +15,31 @@ import com.simplekafka.client.SimpleKafkaConsumer;
 class ConsumerTest {
 
     @Test
+    void seekMovesTheNextPollToTheGivenOffset() throws Exception {
+        try (TestCluster cluster = TestCluster.start(1)) {
+            SimpleKafkaClient client = cluster.client(1);
+            client.createTopic("events", 1, (short) 1);
+            cluster.awaitTopicEverywhere("events");
+            for (int i = 0; i < 3; i++) {
+                client.send("events", 0, ("m" + i).getBytes(StandardCharsets.UTF_8));
+            }
+
+            SimpleKafkaConsumer consumer = new SimpleKafkaConsumer("localhost", cluster.port(1), "events", 0);
+            consumer.initialize();
+
+            consumer.seek(2);
+            assertEquals(List.of("m2"), strings(consumer.poll()));
+            consumer.seek(0);
+            assertEquals(List.of("m0", "m1", "m2"), strings(consumer.poll()));
+            assertEquals(3, consumer.getCurrentOffset());
+        }
+    }
+
+    private static List<String> strings(List<byte[]> messages) {
+        return messages.stream().map(m -> new String(m, StandardCharsets.UTF_8)).collect(java.util.stream.Collectors.toList());
+    }
+
+    @Test
     void restartingAfterAHandlerFailureRedeliversTheFailedMessageAndTheRest() throws Exception {
         try (TestCluster cluster = TestCluster.start(1)) {
             SimpleKafkaClient client = cluster.client(1);
