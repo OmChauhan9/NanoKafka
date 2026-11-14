@@ -653,18 +653,7 @@ public class SimpleKafkaBroker {
         try (SocketChannel leaderChannel = SocketChannel.open()) {
             leaderChannel.connect(new InetSocketAddress(leader.getHost(), leader.getPort()));
 
-            // Prepare forwarded produce request
-            ByteBuffer request = ByteBuffer.allocate(9 + topic.length() + message.length);
-            request.put(Protocol.PRODUCE);
-            request.putShort((short) topic.length());
-            request.put(topic.getBytes());
-            request.putInt(partition);
-            request.putInt(message.length);
-            request.put(message);
-            request.flip();
-
-            // Send request to leader
-            leaderChannel.write(request);
+            leaderChannel.write(Protocol.encodeProduceRequest(topic, partition, message));
 
             // Read response from leader
             ByteBuffer response = ByteBuffer.allocate(10);
@@ -695,19 +684,8 @@ public class SimpleKafkaBroker {
                 try (SocketChannel followerChannel = SocketChannel.open()) {
                     followerChannel.connect(new InetSocketAddress(follower.getHost(), follower.getPort()));
 
-                    // Prepare replication request
-                    ByteBuffer request = ByteBuffer.allocate(17 + topic.length() + message.length);
-                    request.put(Protocol.REPLICATE);
-                    request.putShort((short) topic.length());
-                    request.put(topic.getBytes());
-                    request.putInt(partition.getId());
-                    request.putLong(offset);
-                    request.putInt(message.length);
-                    request.put(message);
-                    request.flip();
-
-                    // Send request to follower
-                    followerChannel.write(request);
+                    followerChannel.write(
+                            Protocol.encodeReplicateRequest(topic, partition.getId(), offset, message));
 
                     // Read acknowledgment
                     ByteBuffer response = ByteBuffer.allocate(1);

@@ -4,6 +4,8 @@ import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
+import java.nio.ByteBuffer;
+import java.nio.channels.SocketChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -69,6 +71,17 @@ public final class TestCluster implements AutoCloseable {
         SimpleKafkaClient client = new SimpleKafkaClient("localhost", port(brokerId));
         client.initialize();
         return client;
+    }
+
+    /** Sends one raw request to one broker, bypassing the client's leader routing. */
+    public ByteBuffer request(int brokerId, ByteBuffer request) throws IOException {
+        try (SocketChannel channel = SocketChannel.open(new InetSocketAddress("localhost", port(brokerId)))) {
+            channel.write(request);
+            ByteBuffer response = ByteBuffer.allocate(64 * 1024);
+            channel.read(response);
+            response.flip();
+            return response;
+        }
     }
 
     public void awaitTopicEverywhere(String topic) {
