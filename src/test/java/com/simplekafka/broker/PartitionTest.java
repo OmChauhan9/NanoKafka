@@ -36,10 +36,30 @@ class PartitionTest {
             partition.append(sized("m" + i, 100_000));
         }
 
-        List<String> labels = strings(partition.readMessages(9, 1024 * 1024)).stream()
-                .map(m -> m.substring(0, m.indexOf(':')))
-                .collect(Collectors.toList());
-        assertEquals(List.of("m9", "m10", "m11", "m12"), labels);
+        assertEquals(List.of("m9", "m10", "m11", "m12"), labels(partition.readMessages(9, 1024 * 1024)));
+        partition.close();
+    }
+
+    @Test
+    void readReturnsTheFirstMessageEvenWhenItExceedsMaxBytes() {
+        Partition partition = new Partition(0, 1, List.of(), dir.toString());
+        for (int i = 0; i < 3; i++) {
+            partition.append(sized("m" + i, 1000));
+        }
+
+        assertEquals(List.of("m0"), labels(partition.readMessages(0, 500)));
+        partition.close();
+    }
+
+    @Test
+    void readCountsTheLengthHeaderAgainstMaxBytes() {
+        Partition partition = new Partition(0, 1, List.of(), dir.toString());
+        for (int i = 0; i < 3; i++) {
+            partition.append(sized("m" + i, 1000));
+        }
+
+        assertEquals(List.of("m0", "m1"), labels(partition.readMessages(0, 2008)));
+        assertEquals(List.of("m0"), labels(partition.readMessages(0, 2007)));
         partition.close();
     }
 
@@ -49,6 +69,10 @@ class PartitionTest {
             s.append('x');
         }
         return bytes(s.toString());
+    }
+
+    static List<String> labels(List<byte[]> messages) {
+        return strings(messages).stream().map(m -> m.substring(0, m.indexOf(':'))).collect(Collectors.toList());
     }
 
     static byte[] bytes(String s) {
