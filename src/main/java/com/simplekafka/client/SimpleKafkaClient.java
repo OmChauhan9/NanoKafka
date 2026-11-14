@@ -1,6 +1,7 @@
 package com.simplekafka.client;
 
 import java.io.IOException;
+import java.net.ConnectException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
@@ -164,8 +165,9 @@ public class SimpleKafkaClient {
     public long send(String topic, int partition, byte[] message) throws IOException {
         try {
             return sendOnce(topic, partition, message);
-        } catch (IOException e) {
-            LOGGER.warning("Send failed, refreshing metadata and retrying: " + e);
+        } catch (ConnectException e) {
+            // Retry only when nothing reached the broker, so a retry cannot append twice.
+            LOGGER.warning("Leader unreachable, refreshing metadata and retrying: " + e);
             refreshMetadata();
             return sendOnce(topic, partition, message);
         }
