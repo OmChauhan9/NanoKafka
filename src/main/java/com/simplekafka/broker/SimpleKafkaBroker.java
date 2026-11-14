@@ -926,12 +926,11 @@ public class SimpleKafkaBroker {
 
         // As controller, create the topic
         if (isController.get()) {
-            createTopic(topic, numPartitions, replicationFactor);
+            boolean created = createTopic(topic, numPartitions, replicationFactor);
 
-            // Send success response
             ByteBuffer response = ByteBuffer.allocate(2);
             response.put(Protocol.CREATE_TOPIC_RESPONSE);
-            response.put((byte) 0); // 0 = success
+            response.put((byte) (created ? 0 : 1));
             response.flip();
             clientChannel.write(response);
         } else {
@@ -993,10 +992,10 @@ public class SimpleKafkaBroker {
     /**
      * Create a new topic with the specified configuration
      */
-    private void createTopic(String topic, int numPartitions, short replicationFactor) {
+    private boolean createTopic(String topic, int numPartitions, short replicationFactor) {
         if (!isController.get()) {
             LOGGER.warning("Only the controller can create topics");
-            return;
+            return false;
         }
 
         try {
@@ -1058,8 +1057,10 @@ public class SimpleKafkaBroker {
                     notifyBrokerForTopicCreation(brokerId, topic);
                 }
             }
+            return true;
         } catch (Exception e) {
             LOGGER.log(Level.SEVERE, "Failed to create topic", e);
+            return false;
         }
     }
 }
