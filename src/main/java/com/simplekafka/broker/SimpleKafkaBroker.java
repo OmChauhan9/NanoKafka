@@ -940,7 +940,14 @@ public class SimpleKafkaBroker {
 
         // As controller, create the topic
         if (isController.get()) {
-            boolean created = createTopic(topic, numPartitions, replicationFactor);
+            boolean created;
+            synchronized (this) {
+                if (topics.containsKey(topic)) {
+                    Protocol.sendErrorResponse(clientChannel, "Topic already exists");
+                    return;
+                }
+                created = createTopic(topic, numPartitions, replicationFactor);
+            }
 
             ByteBuffer response = ByteBuffer.allocate(2);
             response.put(Protocol.CREATE_TOPIC_RESPONSE);
@@ -1025,10 +1032,12 @@ public class SimpleKafkaBroker {
 
             // Create topic in ZooKeeper
             String topicPath = "/topics/" + topic;
-            if (!zkClient.exists(topicPath)) {
-                zkClient.createPersistentNode(topicPath, "");
-                zkClient.createPersistentNode(topicPath + "/partitions", "");
+            if (zkClient.exists(topicPath)) {
+                LOGGER.warning("Topic already exists in ZooKeeper: " + topic);
+                return false;
             }
+            zkClient.createPersistentNode(topicPath, "");
+            zkClient.createPersistentNode(topicPath + "/partitions", "");
 
             // Create partitions
             List<Partition> partitions = new ArrayList<>();
