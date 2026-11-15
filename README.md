@@ -63,7 +63,7 @@ Each item names the test that proves it.
 - The broker serves each connection on its own thread with blocking sockets. (`ConnectionHandlingTest`)
 - The controller handles topic creation. Two concurrent creates of one name produce exactly one topic, and names that are not safe as paths are rejected. (`CreateTopicTest`, `TopicNameTest`)
 - ZooKeeper elects one controller. A restarted broker registers again once its old session ends. (`ControllerRestartTest`, `StaleBrokerSessionTest`, `StaleControllerSessionTest`)
-- When a broker dies, the controller moves its partitions to a live broker. (`LeaderFailoverTest`, `ControllerRestartTest`)
+- When a leader dies, the controller makes a live replica of the partition its leader and tells every broker. A partition with no live replica has no leader until one returns. (`LeaderFailoverTest`, `ControllerRestartTest`)
 - The leader appends each message, replies to the producer, then sends a copy to each follower in the background. (`ReplicationTest`)
 - `SimpleKafkaClient` sends each request to the partition leader. It caches metadata and reads it again when the leader stops answering. (`LeaderFailoverTest`)
 - `SimpleKafkaProducer` creates its topic if needed and picks a random partition for each message. (`ProducerTest`)
@@ -72,7 +72,6 @@ Each item names the test that proves it.
 ## Known limits
 
 - Failover can lose messages. The leader replies before followers have a copy, and the controller does not check that the new leader has every message. Messages acknowledged before a failure can disappear, and their offsets can be used again.
-- Only the controller learns about a new leader. Other brokers keep reporting the old leader.
 - When a broker's own ZooKeeper session expires, the broker does not restore its watches. A controller that stalls past its session timeout can keep acting as controller beside a new one.
 - Under concurrent producers, a follower can store a partition's messages in a different order from its leader, because a follower appends at its own next offset.
 - Consumer offsets live in memory only. A restarted consumer starts from the offset you give it.

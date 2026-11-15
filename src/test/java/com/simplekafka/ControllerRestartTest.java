@@ -16,7 +16,7 @@ class ControllerRestartTest {
     @Test
     void restartedControllerMovesLoadedPartitionsOffDeadBrokers() throws Exception {
         try (TestCluster cluster = TestCluster.start(2)) {
-            cluster.client(1).createTopic("orders", 2, (short) 1);
+            cluster.client(1).createTopic("orders", 2, (short) 2);
             cluster.awaitTopicEverywhere("orders");
 
             cluster.stopBroker(1);
