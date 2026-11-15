@@ -140,12 +140,15 @@ class PartitionTest {
     }
 
     @Test
-    void readContinuesIntoTheNextSegment() {
+    void readContinuesIntoTheNextSegment() throws IOException {
         Partition partition = new Partition(0, 1, List.of(), dir.toString());
         for (int i = 0; i < 13; i++) {
             partition.append(sized("m" + i, 100_000));
         }
 
+        try (java.util.stream.Stream<Path> files = Files.list(dir)) {
+            assertEquals(2, files.filter(f -> f.toString().endsWith(".log")).count(), "13 records of 100 KB fill two 1 MB segments");
+        }
         assertEquals(List.of("m9", "m10", "m11", "m12"), labels(partition.readMessages(9, 1024 * 1024)));
         partition.close();
     }

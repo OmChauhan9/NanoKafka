@@ -18,12 +18,12 @@ The harness lives in `src/test/java/com/simplekafka/bench/Bench.java`. Surefire 
 
 ## What each scenario measures
 
-Every scenario runs one untimed warmup repetition and then 5 timed repetitions. Within a scenario, the variants run interleaved, and the order rotates each repetition, so drift on the machine favors no variant.
+Every scenario runs one untimed warmup repetition and then 5 timed repetitions. Within a scenario, the variants run interleaved, and the order rotates each repetition, which reduces the bias that drift on the machine adds to any one variant.
 
 - **a. Partition append throughput.** One thread calls `Partition.append` 200 times on a fresh partition with 100-byte messages, then with 1 KB messages. Every offset is then read back and compared byte for byte. The same repetitions also time `FileChannel.force(true)` on its own from 1, 4, and 16 threads, plus a log force followed by an index force, which is the I/O an append does with no Partition code around it.
 - **b. Partition single-message read latency.** The scenario reads one 1 KB message at a random offset in the first, middle, and last segment of partitions with 2, 11, and 20 segments, 2,000 reads per repetition. A 20-segment partition holds about 20 MB. Each read is checked against the bytes written at that offset. The 2-segment partition is built with `Partition.append`. The larger ones are written straight to disk in the same format, and the report shows that the direct writer's files are byte-identical to the files `append` writes. A last row times opening, reading, and closing one segment file with no Partition code.
 - **c. End-to-end latency.** A 2-broker `TestCluster` (embedded ZooKeeper and real brokers on free localhost ports) serves a topic at replication factor 1 and one at replication factor 2. The scenario times `SimpleKafkaClient.send` with 100-byte messages, `SimpleKafkaClient.fetch` of one message by offset, and a metadata request that does no disk work. An in-process `Partition.append` runs in the same repetitions as a reference. Afterward, the scenario fetches every acked offset from the leader. For replication factor 2, it also fetches every acked offset straight from the follower.
-- **d. Concurrent produce throughput.** 1, 4, and 16 client threads send 100-byte messages to a 1-partition topic and a 4-partition topic on the same cluster. Thread i sends to partition i mod P with its own client. Afterward, the scenario checks that every acked (partition, offset) pair is unique and fetches back the bytes sent. A force pair measurement runs in the same repetitions to give each variant its disk ceiling.
+- **d. Concurrent produce throughput.** Client threads send 100-byte messages on one cluster: 1, 4, and 16 threads to a 1-partition topic, and 4 and 16 threads to a 4-partition topic. Thread i sends to partition i mod P with its own client. Afterward, the scenario checks that every acked (partition, offset) pair is unique and fetches back the bytes sent. A force pair measurement runs in the same repetitions to give each variant its disk ceiling.
 
 ## Read a report
 
@@ -47,4 +47,4 @@ The report infers limiters from timings measured side by side. To see where the 
 jfr print --events jdk.NativeMethodSample --stack-depth 8 bench.jfr
 ```
 
-For the first recorded result, a separate profiled program that ran 1,600 appends on the same machine put 297 of the 321 native samples under `Partition.append` inside `FileDispatcherImpl.force0`. The log force took 178 and the index force 119. The rest were 14 samples in `RandomAccessFile.open0` and 10 in `FileDispatcherImpl.write0`.
+For the first recorded result, a separate profiled program that ran 1,600 appends on the same machine put 297 of the 321 native samples under `Partition.append` inside `FileDispatcherImpl.force0`. The log force took 178 and the index force 119. The rest were 14 samples in `RandomAccessFile.open0` and 10 in `FileDispatcherImpl.write0`. That profiling program and its recording are not committed, so these counts cannot be rerun from this repository.
