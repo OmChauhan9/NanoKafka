@@ -1,7 +1,9 @@
 package com.simplekafka.broker;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.File;
 import java.io.IOException;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
@@ -95,6 +97,35 @@ class PartitionTest {
                 .collect(Collectors.toList());
         assertEquals(List.of("0", "1"), heads);
         assertEquals(13, reopened.getLogEndOffset());
+        reopened.close();
+    }
+
+    @Test
+    void anAppendWhoseIndexWriteFailsIsRejectedAndLeavesNoRecord() {
+        Partition partition = new Partition(0, 1, List.of(), dir.toString());
+        assertEquals(0, partition.append(bytes("a")));
+
+        File index = dir.resolve(segmentFile(0, ".index")).toFile();
+        long rejected;
+        try {
+            assertTrue(index.setWritable(false));
+            rejected = partition.append(bytes("b"));
+        } finally {
+            index.setWritable(true);
+        }
+        assertEquals(-1, rejected);
+
+        assertEquals(1, partition.append(bytes("c")));
+        assertEquals(2, partition.append(bytes("d")));
+        List<String> expected = List.of("a", "c", "d");
+        for (int offset = 0; offset < expected.size(); offset++) {
+            assertEquals(expected.subList(offset, expected.size()), strings(partition.readMessages(offset, 1024)),
+                    "read from offset " + offset);
+        }
+        partition.close();
+
+        Partition reopened = new Partition(0, 1, List.of(), dir.toString());
+        assertEquals(expected, strings(reopened.readMessages(0, 1024)));
         reopened.close();
     }
 
