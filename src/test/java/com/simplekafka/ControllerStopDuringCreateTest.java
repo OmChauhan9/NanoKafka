@@ -5,8 +5,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
+import org.apache.zookeeper.CreateMode;
+import org.apache.zookeeper.Op;
+import org.apache.zookeeper.ZooDefs;
 import org.apache.zookeeper.ZooKeeper;
 import org.junit.jupiter.api.Test;
 
@@ -50,6 +56,30 @@ class ControllerStopDuringCreateTest {
             }
             assertEquals(400, zk.getChildren("/topics/wide/partitions", false).size(),
                     "partition znodes of wide in ZooKeeper");
+        }
+    }
+
+    // A controller that commits a topic and stops before it tells any broker leaves a topic no live broker has
+    // loaded, all of it led by the stopped broker. The test writes that topic to ZooKeeper itself.
+    @Test
+    void nextControllerMovesPartitionsOfATopicNoBrokerLoaded() throws Exception {
+        try (TestCluster cluster = TestCluster.start(3);
+                ZooKeeper zk = cluster.openZooKeeper()) {
+            assertEquals("1", new String(zk.getData("/controller", false, null)), "controller");
+            List<Op> topic = new ArrayList<>();
+            topic.add(Op.create("/topics/unseen", new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT));
+            topic.add(Op.create("/topics/unseen/partitions", new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                    CreateMode.PERSISTENT));
+            for (int partition = 0; partition < 6; partition++) {
+                topic.add(Op.create("/topics/unseen/partitions/" + partition,
+                        ("1;" + (2 + partition % 2) + ",").getBytes(StandardCharsets.UTF_8), ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                        CreateMode.PERSISTENT));
+            }
+            zk.multi(topic);
+            cluster.stopBroker(1);
+
+            assertEquals(List.of(), cluster.awaitAgreementWithZooKeeper(zk, "unseen", 2, 3),
+                    "brokers whose metadata for unseen differs from ZooKeeper");
         }
     }
 }
