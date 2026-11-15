@@ -144,20 +144,25 @@ public class Partition {
         String logPath = baseDir + File.separator + baseName + LOG_SUFFIX;
         String indexPath = baseDir + File.separator + baseName + INDEX_SUFFIX;
 
-        // Create log file
         File logFile = new File(logPath);
-        logFile.createNewFile();
-
-        // Create index file
         File indexFile = new File(indexPath);
-        indexFile.createNewFile();
-
-        // Add to segments list
         SegmentInfo segment = new SegmentInfo(baseOffset, logPath, indexPath);
+        boolean createdLog = false;
+        boolean createdIndex = false;
+        try {
+            createdLog = logFile.createNewFile();
+            createdIndex = indexFile.createNewFile();
+            openSegmentForAppend(segment);
+        } catch (IOException e) {
+            if (createdLog) {
+                logFile.delete();
+            }
+            if (createdIndex) {
+                indexFile.delete();
+            }
+            throw e;
+        }
         segments.add(segment);
-
-        // Open for append
-        openSegmentForAppend(segment);
 
         LOGGER.info("Created new segment for partition " + id + ", base offset: " + baseOffset);
     }
@@ -166,21 +171,20 @@ public class Partition {
      * Open a segment for append operations
      */
     private void openSegmentForAppend(SegmentInfo segment) throws IOException {
-        // Close the currently active segment if any
-        if (activeLogChannel != null && activeLogChannel.isOpen()) {
-            activeLogChannel.close();
+        RandomAccessFile logFile = new RandomAccessFile(segment.getLogPath(), "rw");
+        logFile.seek(logFile.length());
+
+        RandomAccessFile previous = activeLogFile;
+        activeLogFile = logFile;
+        activeLogChannel = logFile.getChannel();
+        if (previous != null) {
+            try {
+                previous.close();
+            } catch (IOException e) {
+                // The new segment is already active, so this does not fail the roll.
+                LOGGER.log(Level.WARNING, "Failed to close previous segment of partition " + id, e);
+            }
         }
-
-        if (activeLogFile != null) {
-            activeLogFile.close();
-        }
-
-        // Open the segment
-        activeLogFile = new RandomAccessFile(segment.getLogPath(), "rw");
-        activeLogChannel = activeLogFile.getChannel();
-
-        // Move to the end of the file for appending
-        activeLogChannel.position(activeLogChannel.size());
     }
 
     /**
@@ -195,8 +199,6 @@ public class Partition {
 
             // Check if we need to roll over to a new segment
             if (activeLogChannel.position() >= DEFAULT_SEGMENT_SIZE) {
-                activeLogChannel.close();
-                activeLogFile.close();
                 createNewSegment(currentOffset);
             }
 
