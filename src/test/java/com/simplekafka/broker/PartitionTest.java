@@ -129,6 +129,38 @@ class PartitionTest {
         reopened.close();
     }
 
+    @Test
+    void aFailedSegmentRollRejectsOnlyThatAppend() {
+        Partition partition = new Partition(0, 1, List.of(), dir.toString());
+        for (int i = 0; i < 11; i++) {
+            assertEquals(i, partition.append(sized("m" + i, 100_000)));
+        }
+
+        File partitionDir = dir.toFile();
+        long rejected;
+        try {
+            assertTrue(partitionDir.setWritable(false));
+            rejected = partition.append(sized("rejected", 100_000));
+        } finally {
+            partitionDir.setWritable(true);
+        }
+        assertEquals(-1, rejected, "11 records of 100 KB pass 1 MiB, so this append must roll and the roll must fail");
+
+        assertEquals(11, partition.append(sized("m11", 100_000)));
+        assertEquals(12, partition.append(sized("m12", 100_000)));
+        for (int offset = 0; offset <= 12; offset++) {
+            assertEquals(List.of("m" + offset), labels(partition.readMessages(offset, 1)), "read offset " + offset);
+        }
+        partition.close();
+
+        Partition reopened = new Partition(0, 1, List.of(), dir.toString());
+        assertEquals(13, reopened.getLogEndOffset());
+        for (int offset = 0; offset <= 12; offset++) {
+            assertEquals(List.of("m" + offset), labels(reopened.readMessages(offset, 1)), "reopened offset " + offset);
+        }
+        reopened.close();
+    }
+
     static String segmentFile(long baseOffset, String suffix) {
         return String.format("%020d", baseOffset) + suffix;
     }
