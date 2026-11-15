@@ -21,6 +21,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+import org.apache.zookeeper.KeeperException;
+
 public class SimpleKafkaBroker {
     private static final Logger LOGGER = Logger.getLogger(SimpleKafkaBroker.class.getName());
     private static final String DATA_DIR = "data";
@@ -922,7 +924,7 @@ public class SimpleKafkaBroker {
         if (isController.get()) {
             boolean created;
             synchronized (this) {
-                if (topics.containsKey(topic)) {
+                if (nameTakenIgnoringCase(topic)) {
                     Protocol.sendErrorResponse(clientChannel, "Topic already exists");
                     return;
                 }
@@ -938,6 +940,20 @@ public class SimpleKafkaBroker {
             // Forward to controller
             forwardCreateTopicToController(clientChannel, topic, numPartitions, replicationFactor);
         }
+    }
+
+    /**
+     * Names that differ only in case share a partition directory on a case-insensitive filesystem,
+     * so a name is taken when it matches a known topic or a ZooKeeper topic ignoring case.
+     */
+    private boolean nameTakenIgnoringCase(String topic) throws IOException {
+        List<String> names = new ArrayList<>(topics.keySet());
+        try {
+            names.addAll(zkClient.getChildren("/topics"));
+        } catch (KeeperException | InterruptedException e) {
+            throw new IOException("Failed to list topics in ZooKeeper", e);
+        }
+        return names.stream().anyMatch(topic::equalsIgnoreCase);
     }
 
     /**
