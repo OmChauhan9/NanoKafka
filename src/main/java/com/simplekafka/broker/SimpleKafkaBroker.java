@@ -643,8 +643,9 @@ public class SimpleKafkaBroker {
         // Append message to log
         long offset = targetPartition.append(message);
 
-        // Replicate to followers
-        replicateToFollowers(topic, targetPartition, message, offset);
+        if (offset >= 0) {
+            replicateToFollowers(topic, targetPartition, message, offset);
+        }
 
         // Send acknowledgment to client
         ByteBuffer response = ByteBuffer.allocate(10);
