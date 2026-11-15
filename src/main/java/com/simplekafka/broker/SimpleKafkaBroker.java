@@ -9,14 +9,19 @@ import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -63,16 +68,17 @@ public class SimpleKafkaBroker {
     /**
      * Tell a broker to load the topic, or reload its partition assignments, from ZooKeeper
      */
-    private void notifyBrokerOfTopic(int brokerId, String topic) {
+    private Future<Boolean> notifyBrokerOfTopic(int brokerId, String topic) {
         BrokerInfo broker = clusterMetadata.get(brokerId);
         if (broker == null)
-            return;
+            return CompletableFuture.completedFuture(false);
 
-        executor.submit(() -> {
+        return executor.submit(() -> {
             try {
-                Protocol.call(broker.getHost(), broker.getPort(), Protocol.encodeTopicNotification(topic));
+                return Protocol.call(broker.getHost(), broker.getPort(), Protocol.encodeTopicNotification(topic)).get() == 0;
             } catch (IOException e) {
                 LOGGER.log(Level.WARNING, "Failed to notify broker " + brokerId + " about topic " + topic, e);
+                return false;
             }
         });
     }
@@ -1066,10 +1072,25 @@ public class SimpleKafkaBroker {
             // Add topic to broker's metadata
             topics.put(topic, partitions);
 
-            // Notify all brokers to load the topic
+            // Reply only after the other brokers load the topic, so a produce to any partition right after
+            // success finds it. A broker that misses the deadline still gets success, because the topic is
+            // already in ZooKeeper and the broker loads it from there when it restarts.
+            Map<Integer, Future<Boolean>> acks = new HashMap<>();
             for (int brokerId : brokerIds) {
                 if (brokerId != this.brokerId) {
-                    notifyBrokerOfTopic(brokerId, topic);
+                    acks.put(brokerId, notifyBrokerOfTopic(brokerId, topic));
+                }
+            }
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            for (Map.Entry<Integer, Future<Boolean>> ack : acks.entrySet()) {
+                boolean loaded;
+                try {
+                    loaded = ack.getValue().get(deadline - System.nanoTime(), TimeUnit.NANOSECONDS);
+                } catch (ExecutionException | TimeoutException e) {
+                    loaded = false;
+                }
+                if (!loaded) {
+                    LOGGER.warning("Broker " + ack.getKey() + " did not confirm loading topic " + topic + " within 5 s");
                 }
             }
             return true;
