@@ -11,7 +11,9 @@ import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -23,6 +25,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -46,6 +49,11 @@ public class SimpleKafkaBroker {
     private final Map<Integer, BrokerInfo> clusterMetadata;
     private final ZookeeperClient zkClient;
     private final Set<SocketChannel> clientChannels = ConcurrentHashMap.newKeySet();
+    // Broker changes, elections, rebalances and topic creation run here one at a time, so each sees the effects
+    // of the last, and none runs on ZooKeeper's event thread.
+    private final ScheduledExecutorService clusterEvents = Executors.newSingleThreadScheduledExecutor();
+    // The brokers this controller has sent every topic since it took over. Used only on clusterEvents.
+    private final Set<Integer> syncedBrokers = new HashSet<>();
 
     public SimpleKafkaBroker(int brokerId, String host, int port, int zkPort) throws IOException {
         this.brokerId = brokerId;
@@ -234,8 +242,14 @@ public class SimpleKafkaBroker {
             // Register with ZooKeeper
             registerWithZookeeper();
 
-            // Start controller election process
-            electController();
+            // A create sent as soon as start returns needs the election settled.
+            try {
+                clusterEvents.submit(this::electController).get();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } catch (ExecutionException e) {
+                LOGGER.log(Level.SEVERE, "Controller election failed", e);
+            }
 
             // Accept client connections
             executor.submit(this::acceptConnections);
@@ -255,6 +269,10 @@ public class SimpleKafkaBroker {
                 for (SocketChannel clientChannel : clientChannels) {
                     closeClient(clientChannel);
                 }
+
+                // Before the partitions close, because a rebalance loads topics.
+                clusterEvents.shutdownNow();
+                clusterEvents.awaitTermination(5, TimeUnit.SECONDS);
 
                 // Close all topic partitions
                 for (List<Partition> partitions : topics.values()) {
@@ -284,7 +302,6 @@ public class SimpleKafkaBroker {
         try {
             zkClient.connect();
 
-            // The broker watch below can elect this broker, and its rebalance only sees loaded topics.
             loadTopics();
 
             createBrokerNode();
@@ -294,7 +311,7 @@ public class SimpleKafkaBroker {
             clusterMetadata.put(brokerId, selfInfo);
 
             // Watch for other brokers
-            zkClient.watchChildren("/brokers", this::onBrokersChanged);
+            zkClient.watchChildren("/brokers", brokerIds -> queueClusterEvent(this::onBrokersChanged, 0));
 
             LOGGER.info("Registered with ZooKeeper at " + zkClient.getConnectString());
         } catch (Exception e) {
@@ -315,13 +332,56 @@ public class SimpleKafkaBroker {
     }
 
     /**
+     * Run an event on clusterEvents after the given delay. A stopped broker drops it.
+     */
+    private void queueClusterEvent(Runnable event, long delayMillis) {
+        try {
+            clusterEvents.schedule(() -> {
+                try {
+                    event.run();
+                } catch (RuntimeException e) {
+                    LOGGER.log(Level.SEVERE, "Cluster event failed", e);
+                }
+            }, delayMillis, TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException e) {
+            LOGGER.log(Level.FINE, "Dropped a cluster event after stop", e);
+        }
+    }
+
+    /**
      * Handle changes in the broker list from ZooKeeper
      */
-    private void onBrokersChanged(List<String> brokerIds) {
-        LOGGER.info("Broker change detected. Current brokers: " + brokerIds);
+    private void onBrokersChanged() {
+        List<String> brokerIds;
+        try {
+            brokerIds = refreshBrokers();
+        } catch (KeeperException | InterruptedException e) {
+            LOGGER.log(Level.WARNING, "Failed to read the broker list", e);
+            return;
+        }
 
         // A node left by this broker's previous, dead session blocks registration until it expires.
         boolean registered = brokerIds.contains(String.valueOf(brokerId)) || createBrokerNode();
+
+        // Re-elect controller if needed
+        if (!registered && isController.get()) {
+            isController.set(false);
+            LOGGER.info("This broker is no longer in the cluster, giving up controller status");
+        } else if (isController.get()) {
+            // As controller, rebalance partitions due to cluster changes
+            rebalancePartitions();
+        } else {
+            // Re-attempt controller election
+            electController();
+        }
+    }
+
+    /**
+     * Read the registered brokers from ZooKeeper into clusterMetadata and return their ids.
+     */
+    private List<String> refreshBrokers() throws KeeperException, InterruptedException {
+        List<String> brokerIds = zkClient.getChildren("/brokers");
+        LOGGER.info("Current brokers: " + brokerIds);
 
         // Update cluster metadata
         for (String id : brokerIds) {
@@ -354,18 +414,7 @@ public class SimpleKafkaBroker {
             clusterMetadata.remove(brokerId);
             LOGGER.info("Removed broker: " + brokerId);
         }
-
-        // Re-elect controller if needed
-        if (!registered && isController.get()) {
-            isController.set(false);
-            LOGGER.info("This broker is no longer in the cluster, giving up controller status");
-        } else if (isController.get()) {
-            // As controller, rebalance partitions due to cluster changes
-            rebalancePartitions();
-        } else {
-            // Re-attempt controller election
-            electController();
-        }
+        return brokerIds;
     }
 
     /**
@@ -398,6 +447,7 @@ public class SimpleKafkaBroker {
 
             if (becameController) {
                 isController.set(true);
+                syncedBrokers.clear();
                 LOGGER.info("This broker is now the active controller");
 
                 // As controller, ensure all topics are properly replicated
@@ -407,15 +457,7 @@ public class SimpleKafkaBroker {
                 String controllerId = zkClient.getData(controllerPath);
                 if (controllerId == null || controllerId.trim().isEmpty()) {
                     LOGGER.warning("Controller node exists but has no data. This is unexpected.");
-                    // Try again after a delay
-                    new Thread(() -> {
-                        try {
-                            Thread.sleep(1000);
-                            electController();
-                        } catch (InterruptedException e) {
-                            Thread.currentThread().interrupt();
-                        }
-                    }).start();
+                    queueClusterEvent(this::electController, 1000);
                     return;
                 }
 
@@ -426,16 +468,7 @@ public class SimpleKafkaBroker {
             }
         } catch (Exception e) {
             LOGGER.log(Level.SEVERE, "Controller election failed", e);
-
-            // Try again after a delay
-            new Thread(() -> {
-                try {
-                    Thread.sleep(2000);
-                    electController();
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                }
-            }).start();
+            queueClusterEvent(this::electController, 2000);
         }
     }
 
@@ -444,20 +477,30 @@ public class SimpleKafkaBroker {
      */
     private void onControllerChange() {
         LOGGER.info("Controller changed, initiating new election");
-        electController();
+        queueClusterEvent(this::electController, 0);
     }
 
     /**
-     * Rebalance partitions across available brokers. It shares the create path's monitor, so a rebalance for a
-     * broker that leaves mid-create runs once the new topic is published and moves its partitions too.
+     * Move partitions led by a broker that left to a live replica, and tell the other brokers. A broker this
+     * controller has not synced since it took over gets every topic, because it may have read ZooKeeper before
+     * the latest create or reassignment and no notice since then went to it.
      */
-    private synchronized void rebalancePartitions() {
+    private void rebalancePartitions() {
         if (!isController.get()) {
             return;
         }
 
         LOGGER.info("Rebalancing partitions across cluster");
+        try {
+            refreshBrokers();
+        } catch (KeeperException | InterruptedException e) {
+            LOGGER.log(Level.WARNING, "Failed to read the broker list", e);
+            return;
+        }
+        // The previous controller may have created topics this broker never loaded.
+        loadTopics();
 
+        Set<String> reassignedTopics = new HashSet<>();
         for (Map.Entry<String, List<Partition>> entry : topics.entrySet()) {
             String topic = entry.getKey();
             boolean reassigned = false;
@@ -492,11 +535,18 @@ public class SimpleKafkaBroker {
             }
 
             if (reassigned) {
-                for (int brokerId : clusterMetadata.keySet()) {
-                    if (brokerId != this.brokerId) {
-                        notifyBrokerOfTopic(brokerId, topic);
-                    }
-                }
+                reassignedTopics.add(topic);
+            }
+        }
+
+        syncedBrokers.retainAll(clusterMetadata.keySet());
+        for (int brokerId : clusterMetadata.keySet()) {
+            if (brokerId == this.brokerId) {
+                continue;
+            }
+            Collection<String> stale = syncedBrokers.add(brokerId) ? topics.keySet() : reassignedTopics;
+            for (String topic : stale) {
+                notifyBrokerOfTopic(brokerId, topic);
             }
         }
     }
@@ -920,19 +970,26 @@ public class SimpleKafkaBroker {
 
         // As controller, create the topic
         if (isController.get()) {
-            boolean created;
-            synchronized (this) {
-                if (nameTakenIgnoringCase(topic)) {
-                    Protocol.sendErrorResponse(clientChannel, "Topic already exists");
-                    return;
-                }
-                created = createTopic(topic, numPartitions, replicationFactor);
+            ByteBuffer response;
+            try {
+                response = clusterEvents.submit(() -> {
+                    if (nameTakenIgnoringCase(topic)) {
+                        return Protocol.encodeErrorResponse("Topic already exists");
+                    }
+                    boolean created = createTopic(topic, numPartitions, replicationFactor);
+                    ByteBuffer status = ByteBuffer.allocate(2);
+                    status.put(Protocol.CREATE_TOPIC_RESPONSE);
+                    status.put((byte) (created ? 0 : 1));
+                    status.flip();
+                    return status;
+                }).get();
+            } catch (RejectedExecutionException | ExecutionException e) {
+                LOGGER.log(Level.SEVERE, "Failed to create topic", e);
+                response = Protocol.encodeErrorResponse("Failed to create topic");
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
             }
-
-            ByteBuffer response = ByteBuffer.allocate(2);
-            response.put(Protocol.CREATE_TOPIC_RESPONSE);
-            response.put((byte) (created ? 0 : 1));
-            response.flip();
             Protocol.writeFrame(clientChannel, response);
         } else {
             // Forward to controller
