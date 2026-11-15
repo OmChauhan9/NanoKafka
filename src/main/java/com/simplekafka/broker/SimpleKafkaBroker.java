@@ -595,7 +595,10 @@ public class SimpleKafkaBroker {
 
         switch (messageType) {
             case Protocol.PRODUCE:
-                handleProduceRequest(clientChannel, buffer);
+                handleProduceRequest(clientChannel, buffer, true);
+                break;
+            case Protocol.FORWARDED_PRODUCE:
+                handleProduceRequest(clientChannel, buffer, false);
                 break;
             case Protocol.FETCH:
                 handleFetchRequest(clientChannel, buffer);
@@ -621,7 +624,8 @@ public class SimpleKafkaBroker {
     /**
      * Handle produce request from client
      */
-    private void handleProduceRequest(SocketChannel clientChannel, ByteBuffer buffer) throws IOException {
+    private void handleProduceRequest(SocketChannel clientChannel, ByteBuffer buffer, boolean mayForward)
+            throws IOException {
         String topic = Protocol.readString(buffer);
 
         int partition = buffer.getInt();
@@ -661,7 +665,11 @@ public class SimpleKafkaBroker {
 
         // Check if this broker is the leader for the partition
         if (targetPartition.getLeader() != brokerId) {
-            // Forward to leader
+            // Two brokers that each name the other as leader would pass one produce back and forth forever.
+            if (!mayForward) {
+                Protocol.sendErrorResponse(clientChannel, "Not the leader for partition " + partition);
+                return;
+            }
             forwardProduceToLeader(clientChannel, topic, partition, message, targetPartition.getLeader());
             return;
         }
@@ -696,7 +704,7 @@ public class SimpleKafkaBroker {
         ByteBuffer response;
         try {
             response = Protocol.call(leader.getHost(), leader.getPort(),
-                    Protocol.encodeProduceRequest(topic, partition, message));
+                    Protocol.encodeForwardedProduceRequest(topic, partition, message));
         } catch (IOException e) {
             LOGGER.log(Level.SEVERE, "Failed to forward produce request to leader", e);
             Protocol.sendErrorResponse(clientChannel, "Failed to forward to leader");
@@ -814,6 +822,12 @@ public class SimpleKafkaBroker {
 
         if (targetPartition == null) {
             Protocol.sendErrorResponse(clientChannel, "Partition does not exist");
+            return;
+        }
+
+        // A follower can lag the leader, so a reader with stale metadata must refresh rather than read here.
+        if (targetPartition.getLeader() != brokerId) {
+            Protocol.sendErrorResponse(clientChannel, "Not the leader for partition " + partition);
             return;
         }
 

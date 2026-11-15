@@ -75,9 +75,8 @@ class FetchFrameLimitTest {
             assertEquals(0, client.send("tt", 0, largest));
             TestCluster.await("follower " + follower + " to hold the largest message", () -> {
                 try {
-                    Protocol.FetchResult result = Protocol.decodeFetchResponse(
-                            cluster.request(follower, Protocol.encodeFetchRequest("tt", 0, 0, 1)));
-                    return result.getMessageCount() == 1 && Arrays.equals(largest, result.getMessages()[0]);
+                    List<byte[]> messages = TestCluster.messagesOnDisk(follower, "tt", 0);
+                    return messages.size() == 1 && Arrays.equals(largest, messages.get(0));
                 } catch (IOException e) {
                     return false;
                 }
