@@ -213,8 +213,13 @@ public class Partition {
             // Force write to disk
             activeLogChannel.force(true);
 
-            // Update index
-            updateIndex(currentOffset, position);
+            try {
+                updateIndex(currentOffset, position);
+            } catch (IOException e) {
+                // Drop the unindexed record so the next append reuses this offset and position.
+                activeLogChannel.truncate(position);
+                throw e;
+            }
 
             // Update offset
             nextOffset.incrementAndGet();
@@ -231,31 +236,27 @@ public class Partition {
     /**
      * Update the index file with new offset
      */
-    private void updateIndex(long offset, long position) {
-        try {
-            // Find the current segment
-            if (segments.isEmpty())
-                return;
+    private void updateIndex(long offset, long position) throws IOException {
+        // Find the current segment
+        if (segments.isEmpty())
+            return;
 
-            SegmentInfo currentSegment = segments.get(segments.size() - 1);
+        SegmentInfo currentSegment = segments.get(segments.size() - 1);
 
-            try (RandomAccessFile indexFile = new RandomAccessFile(currentSegment.getIndexPath(), "rw");
-                    FileChannel indexChannel = indexFile.getChannel()) {
+        try (RandomAccessFile indexFile = new RandomAccessFile(currentSegment.getIndexPath(), "rw");
+                FileChannel indexChannel = indexFile.getChannel()) {
 
-                // Position at the end
-                indexChannel.position(indexChannel.size());
+            // Position at the end
+            indexChannel.position(indexChannel.size());
 
-                // Write offset and position
-                ByteBuffer buffer = ByteBuffer.allocate(16);
-                buffer.putLong(offset);
-                buffer.putLong(position);
-                buffer.flip();
+            // Write offset and position
+            ByteBuffer buffer = ByteBuffer.allocate(16);
+            buffer.putLong(offset);
+            buffer.putLong(position);
+            buffer.flip();
 
-                indexChannel.write(buffer);
-                indexChannel.force(true);
-            }
-        } catch (IOException e) {
-            LOGGER.log(Level.SEVERE, "Failed to update index for partition " + id, e);
+            indexChannel.write(buffer);
+            indexChannel.force(true);
         }
     }
 
