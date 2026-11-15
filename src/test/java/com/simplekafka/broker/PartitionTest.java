@@ -176,6 +176,23 @@ class PartitionTest {
     }
 
     @Test
+    void reopenLoadsSegmentsNamedWithNonAsciiDigits() throws IOException {
+        Partition partition = new Partition(0, 1, List.of(), dir.toString());
+        partition.append(bytes("a"));
+        partition.close();
+        // Segment names come from String.format in the default locale, which writes Arabic-Indic digits under ar-EG.
+        String arabicIndicZeros = "٠".repeat(20);
+        for (String suffix : List.of(".log", ".index")) {
+            Files.move(dir.resolve(segmentFile(0, suffix)), dir.resolve(arabicIndicZeros + suffix));
+        }
+
+        Partition reopened = new Partition(0, 1, List.of(), dir.toString());
+        assertEquals(List.of("a"), strings(reopened.readMessages(0, 1024)));
+        assertEquals(1, reopened.append(bytes("b")));
+        reopened.close();
+    }
+
+    @Test
     void aPartitionThatFailedToLoadRejectsAppends() {
         File partitionDir = dir.toFile();
         Partition partition;
