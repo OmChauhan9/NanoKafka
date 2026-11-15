@@ -221,17 +221,15 @@ public class Partition {
             buffer.put(message);
             buffer.flip();
 
-            // Write to file
             long position = activeLogChannel.position();
-            activeLogChannel.write(buffer);
-
-            // Force write to disk
-            activeLogChannel.force(true);
-
             try {
+                while (buffer.hasRemaining()) {
+                    activeLogChannel.write(buffer);
+                }
+                activeLogChannel.force(true);
                 updateIndex(currentOffset, position);
             } catch (IOException e) {
-                // Drop the unindexed record so the next append reuses this offset and position.
+                // Drop the unacknowledged record so the next append reuses this offset and position.
                 activeLogChannel.truncate(position);
                 throw e;
             }
@@ -260,8 +258,8 @@ public class Partition {
 
         try (FileChannel indexChannel = channels.open(Path.of(currentSegment.getIndexPath()))) {
 
-            // Position at the end
-            indexChannel.position(indexChannel.size());
+            long size = indexChannel.size();
+            indexChannel.position(size);
 
             // Write offset and position
             ByteBuffer buffer = ByteBuffer.allocate(16);
@@ -269,8 +267,15 @@ public class Partition {
             buffer.putLong(position);
             buffer.flip();
 
-            indexChannel.write(buffer);
-            indexChannel.force(true);
+            try {
+                while (buffer.hasRemaining()) {
+                    indexChannel.write(buffer);
+                }
+                indexChannel.force(true);
+            } catch (IOException e) {
+                indexChannel.truncate(size);
+                throw e;
+            }
         }
     }
 
