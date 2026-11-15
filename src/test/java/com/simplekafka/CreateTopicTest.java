@@ -2,6 +2,7 @@ package com.simplekafka;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -59,6 +60,23 @@ class CreateTopicTest {
                     .collect(Collectors.toList()));
         } finally {
             pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void createRejectsANameThatDiffersFromAnExistingTopicOnlyInCase() throws Exception {
+        try (TestCluster cluster = TestCluster.start(1)) {
+            SimpleKafkaClient client = cluster.client(1);
+            assertTrue(client.createTopic("demo", 1, (short) 1));
+            assertEquals(0, client.send("demo", 0, "kept".getBytes(StandardCharsets.UTF_8)));
+
+            assertFalse(client.createTopic("DEMO", 1, (short) 1), "create of DEMO after demo");
+            assertFalse(client.createTopic("Demo", 1, (short) 1), "create of Demo after demo");
+
+            assertEquals(List.of("kept"), client.fetch("demo", 0, 0, 1024).stream()
+                    .map(bytes -> new String(bytes, StandardCharsets.UTF_8))
+                    .collect(Collectors.toList()));
+            assertTrue(client.createTopic("demo2", 1, (short) 1), "create of a distinct name");
         }
     }
 }
