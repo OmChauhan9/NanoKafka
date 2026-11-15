@@ -445,9 +445,10 @@ public class SimpleKafkaBroker {
     }
 
     /**
-     * Rebalance partitions across available brokers
+     * Rebalance partitions across available brokers. It shares the create path's monitor, so a rebalance for a
+     * broker that leaves mid-create runs once the new topic is published and moves its partitions too.
      */
-    private void rebalancePartitions() {
+    private synchronized void rebalancePartitions() {
         if (!isController.get()) {
             return;
         }
