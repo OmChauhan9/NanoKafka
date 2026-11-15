@@ -370,8 +370,8 @@ public final class Bench {
                         + "The widest run-to-run range of any one cell is %s us.",
                 num(lowest), num(highest), num(highest / lowest), num(widestRange)));
         section.analysis.add(verdict(flat,
-                "Verdict on the README's \"index-based O(1) message lookups\": flat within noise on this range. Read latency does not grow with the offset's position or with segment count from 2 to 20.",
-                "Verdict on the README's \"index-based O(1) message lookups\": not flat on this range. The spread between cells exceeds the run-to-run range, so position or segment count changes latency."));
+                "Verdict on the README's \"one seek\" read claim: flat within noise on this range. Read latency does not grow with the offset's position or with segment count from 2 to 20.",
+                "Verdict on the README's \"one seek\" read claim: not flat on this range. The spread between cells exceeds the run-to-run range, so position or segment count changes latency."));
         section.analysis.add("Scope of that verdict. From the code, each read binary-searches the segment list, which is O(log S), "
                 + "then calls `segments.indexOf`, which is O(S), then seeks straight to the index entry, which is O(1) within a segment. "
                 + "At 20 segments those list walks cost nanoseconds, so this run cannot separate O(1) from O(log S) or O(S) in the segment count. "
