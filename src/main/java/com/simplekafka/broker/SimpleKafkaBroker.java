@@ -998,14 +998,16 @@ public class SimpleKafkaBroker {
     }
 
     /**
-     * A topic name becomes a directory and a ZooKeeper path, so it may hold only letters, digits,
-     * dots, underscores and hyphens, at most 249 characters, and may not be "." or "..".
+     * A topic name becomes a directory and a ZooKeeper path, so it may hold only ASCII letters, digits,
+     * dots, underscores and hyphens, at most 249 characters, and may not be "." or "..". Non-ASCII is
+     * out because filesystems that fold Unicode case or normalization map distinct names to one directory.
      */
     static boolean isValidTopicName(String topic) {
         if (topic.isEmpty() || topic.length() > 249 || topic.equals(".") || topic.equals("..")) {
             return false;
         }
-        return topic.codePoints().allMatch(c -> Character.isLetterOrDigit(c) || c == '.' || c == '_' || c == '-');
+        return topic.chars().allMatch(c -> (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+                || c == '.' || c == '_' || c == '-');
     }
 
     /**
