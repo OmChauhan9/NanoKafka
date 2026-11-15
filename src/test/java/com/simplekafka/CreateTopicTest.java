@@ -6,14 +6,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.stream.Collectors;
 
+import org.apache.zookeeper.ZooDefs;
+import org.apache.zookeeper.ZooKeeper;
+import org.apache.zookeeper.data.ACL;
 import org.junit.jupiter.api.Test;
 
 import com.simplekafka.client.SimpleKafkaClient;
@@ -22,35 +25,27 @@ class CreateTopicTest {
 
     @Test
     void createReportsFailureWhenZooKeeperRejectsTheTopic() throws Exception {
-        try (TestCluster cluster = TestCluster.start(1)) {
-            assertFalse(cluster.client(1).createTopic("a/b", 1, (short) 1),
-                    "createTopic must report the ZooKeeper failure");
+        try (TestCluster cluster = TestCluster.start(1);
+                ZooKeeper zk = cluster.openZooKeeper()) {
+            SimpleKafkaClient client = cluster.client(1);
+            // ADMIN stays so this session can put the open ACL back.
+            List<ACL> readOnly = Collections.singletonList(
+                    new ACL(ZooDefs.Perms.READ | ZooDefs.Perms.ADMIN, ZooDefs.Ids.ANYONE_ID_UNSAFE));
+            zk.setACL("/topics", readOnly, -1);
+
+            assertFalse(client.createTopic("rejected", 1, (short) 1), "createTopic must report the ZooKeeper failure");
+
+            zk.setACL("/topics", ZooDefs.Ids.OPEN_ACL_UNSAFE, -1);
+            assertTrue(client.createTopic("rejected", 1, (short) 1), "retry after ZooKeeper accepts writes again");
+            assertEquals(0, client.send("rejected", 0, "m".getBytes(StandardCharsets.UTF_8)));
         }
     }
 
     @Test
     void concurrentCreatesOfOneTopicLetExactlyOneSucceed() throws Exception {
-        int creators = 4;
-        ExecutorService pool = Executors.newFixedThreadPool(creators);
         try (TestCluster cluster = TestCluster.start(1)) {
-            CountDownLatch go = new CountDownLatch(1);
-            List<Future<Boolean>> results = new ArrayList<>();
-            for (int i = 0; i < creators; i++) {
-                SimpleKafkaClient client = cluster.client(1);
-                Callable<Boolean> create = () -> {
-                    go.await();
-                    return client.createTopic("race", 100, (short) 1);
-                };
-                results.add(pool.submit(create));
-            }
-            go.countDown();
-            int succeeded = 0;
-            for (Future<Boolean> result : results) {
-                if (result.get()) {
-                    succeeded++;
-                }
-            }
-            assertEquals(1, succeeded, "creates of one topic that reported success");
+            List<Boolean> results = createAllAtOnce(cluster, List.of("race", "race", "race", "race"), 100);
+            assertEquals(1, results.stream().filter(created -> created).count(), "creates that reported success");
 
             SimpleKafkaClient client = cluster.client(1);
             assertEquals(0, client.send("race", 0, "first".getBytes(StandardCharsets.UTF_8)));
@@ -58,8 +53,21 @@ class CreateTopicTest {
             assertEquals(List.of("first", "second"), client.fetch("race", 0, 0, 1024).stream()
                     .map(bytes -> new String(bytes, StandardCharsets.UTF_8))
                     .collect(Collectors.toList()));
-        } finally {
-            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void concurrentCreatesOfNamesThatDifferOnlyInCaseLetExactlyOneSucceed() throws Exception {
+        List<String> names = List.of("Orders", "orders", "ORDERS", "oRdErS");
+        try (TestCluster cluster = TestCluster.start(1);
+                ZooKeeper zk = cluster.openZooKeeper()) {
+            List<Boolean> results = createAllAtOnce(cluster, names, 1);
+
+            assertEquals(1, results.stream().filter(created -> created).count(),
+                    "creates that reported success " + results);
+            List<String> stored = zk.getChildren("/topics", false);
+            assertEquals(1, stored.stream().filter("orders"::equalsIgnoreCase).count(),
+                    "topics in ZooKeeper " + stored);
         }
     }
 
@@ -77,6 +85,30 @@ class CreateTopicTest {
                     .map(bytes -> new String(bytes, StandardCharsets.UTF_8))
                     .collect(Collectors.toList()));
             assertTrue(client.createTopic("demo2", 1, (short) 1), "create of a distinct name");
+        }
+    }
+
+    private static List<Boolean> createAllAtOnce(TestCluster cluster, List<String> names, int partitions)
+            throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(names.size());
+        try {
+            CountDownLatch go = new CountDownLatch(1);
+            List<Future<Boolean>> pending = new ArrayList<>();
+            for (String name : names) {
+                SimpleKafkaClient client = cluster.client(1);
+                pending.add(pool.submit(() -> {
+                    go.await();
+                    return client.createTopic(name, partitions, (short) 1);
+                }));
+            }
+            go.countDown();
+            List<Boolean> results = new ArrayList<>();
+            for (Future<Boolean> result : pending) {
+                results.add(result.get());
+            }
+            return results;
+        } finally {
+            pool.shutdownNow();
         }
     }
 }
