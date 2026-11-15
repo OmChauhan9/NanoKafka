@@ -23,8 +23,8 @@ public class Partition {
     private static final String INDEX_SUFFIX = ".index";
 
     private final int id; // Unique partition identifier
-    private int leader; // Leader broker ID
-    private List<Integer> followers; // Follower broker IDs for replication
+    private volatile int leader; // Leader broker ID
+    private volatile List<Integer> followers; // Follower broker IDs for replication
     private final String baseDir; // Directory for log storage
     private final AtomicLong nextOffset; // Next available message offset
     private final ReadWriteLock lock; // Concurrency control mechanism

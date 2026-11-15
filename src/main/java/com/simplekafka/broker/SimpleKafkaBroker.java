@@ -59,9 +59,9 @@ public class SimpleKafkaBroker {
     }
 
     /**
-     * Notify a broker about topic creation
+     * Tell a broker to load the topic, or reload its partition assignments, from ZooKeeper
      */
-    private void notifyBrokerForTopicCreation(int brokerId, String topic) {
+    private void notifyBrokerOfTopic(int brokerId, String topic) {
         BrokerInfo broker = clusterMetadata.get(brokerId);
         if (broker == null)
             return;
@@ -70,7 +70,7 @@ public class SimpleKafkaBroker {
             try {
                 Protocol.call(broker.getHost(), broker.getPort(), Protocol.encodeTopicNotification(topic));
             } catch (IOException e) {
-                LOGGER.log(Level.WARNING, "Failed to notify broker " + brokerId + " about topic creation", e);
+                LOGGER.log(Level.WARNING, "Failed to notify broker " + brokerId + " about topic " + topic, e);
             }
         });
     }
@@ -104,14 +104,9 @@ public class SimpleKafkaBroker {
     }
 
     /**
-     * Load topic metadata from ZooKeeper
+     * Load topic metadata from ZooKeeper, or refresh the leader and followers of a loaded topic
      */
-    private void loadTopic(String topic) throws Exception {
-        if (topics.containsKey(topic)) {
-            LOGGER.info("Topic already loaded: " + topic);
-            return;
-        }
-
+    private synchronized void loadTopic(String topic) throws Exception {
         String topicPath = "/topics/" + topic;
         if (!zkClient.exists(topicPath)) {
             throw new Exception("Topic does not exist in ZooKeeper: " + topic);
@@ -120,6 +115,7 @@ public class SimpleKafkaBroker {
         String topicDir = DATA_DIR + File.separator + brokerId + File.separator + topic;
         new File(topicDir).mkdirs();
 
+        List<Partition> loaded = topics.get(topic);
         List<String> partitionIds = zkClient.getChildren(topicPath + "/partitions");
         List<Partition> partitions = new ArrayList<>();
 
@@ -141,6 +137,16 @@ public class SimpleKafkaBroker {
                 }
             }
 
+            if (loaded != null) {
+                for (Partition partition : loaded) {
+                    if (partition.getId() == id) {
+                        partition.setLeader(leader);
+                        partition.setFollowers(followers);
+                    }
+                }
+                continue;
+            }
+
             String partitionDir = topicDir + File.separator + id;
             new File(partitionDir).mkdirs();
 
@@ -151,8 +157,10 @@ public class SimpleKafkaBroker {
                     ", leader: " + leader + ", followers: " + followers);
         }
 
-        topics.put(topic, partitions);
-        LOGGER.info("Successfully loaded topic: " + topic + " with " + partitions.size() + " partitions");
+        if (loaded == null) {
+            topics.put(topic, partitions);
+            LOGGER.info("Successfully loaded topic: " + topic + " with " + partitions.size() + " partitions");
+        }
     }
 
     /**
@@ -441,31 +449,41 @@ public class SimpleKafkaBroker {
 
         for (Map.Entry<String, List<Partition>> entry : topics.entrySet()) {
             String topic = entry.getKey();
-            List<Partition> partitions = entry.getValue();
+            boolean reassigned = false;
 
-            for (Partition partition : partitions) {
-                // Ensure each partition has a leader
-                if (partition.getLeader() == -1 || !clusterMetadata.containsKey(partition.getLeader())) {
-                    // Assign a new leader
-                    List<Integer> brokers = new ArrayList<>(clusterMetadata.keySet());
-                    if (!brokers.isEmpty()) {
-                        int newLeader = brokers.get(0);
-                        partition.setLeader(newLeader);
+            for (Partition partition : entry.getValue()) {
+                int oldLeader = partition.getLeader();
+                if (oldLeader != -1 && clusterMetadata.containsKey(oldLeader)) {
+                    continue;
+                }
 
-                        // Set other brokers as followers
-                        List<Integer> followers = new ArrayList<>();
-                        for (int i = 1; i < Math.min(brokers.size(), 3); i++) {
-                            followers.add(brokers.get(i));
-                        }
-                        partition.setFollowers(followers);
+                // Only replicas hold the partition's log, so the leader moves within the replica set. A dead
+                // replica stays listed as a follower so it can lead again when it returns.
+                List<Integer> replicas = new ArrayList<>();
+                if (oldLeader != -1) {
+                    replicas.add(oldLeader);
+                }
+                replicas.addAll(partition.getFollowers());
+                int newLeader = replicas.stream().filter(clusterMetadata::containsKey).findFirst().orElse(-1);
+                if (newLeader == oldLeader) {
+                    continue;
+                }
+                replicas.remove(Integer.valueOf(newLeader));
+                partition.setLeader(newLeader);
+                partition.setFollowers(replicas);
+                updatePartitionMetadata(topic, partition);
+                reassigned = true;
 
-                        // Update partition metadata in ZooKeeper
-                        updatePartitionMetadata(topic, partition);
+                LOGGER.info("Reassigned partition " + partition.getId() +
+                        " of topic " + topic +
+                        " to leader " + newLeader +
+                        " with followers " + replicas);
+            }
 
-                        LOGGER.info("Reassigned partition " + partition.getId() +
-                                " of topic " + topic +
-                                " to leader " + newLeader +
-                                " with followers " + followers);
+            if (reassigned) {
+                for (int brokerId : clusterMetadata.keySet()) {
+                    if (brokerId != this.brokerId) {
+                        notifyBrokerOfTopic(brokerId, topic);
                     }
                 }
             }
@@ -1058,7 +1076,7 @@ public class SimpleKafkaBroker {
             // Notify all brokers to load the topic
             for (int brokerId : brokerIds) {
                 if (brokerId != this.brokerId) {
-                    notifyBrokerForTopicCreation(brokerId, topic);
+                    notifyBrokerOfTopic(brokerId, topic);
                 }
             }
             return true;
