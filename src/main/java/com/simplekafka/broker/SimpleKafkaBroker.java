@@ -12,6 +12,7 @@ import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -896,6 +897,12 @@ public class SimpleKafkaBroker {
             Protocol.sendErrorResponse(clientChannel, "Invalid topic configuration");
             return;
         }
+        int brokerIdWidth = clusterMetadata.keySet().stream().mapToInt(id -> String.valueOf(id).length()).max().orElse(1);
+        if (createTopicRequestBytes(topic, numPartitions, replicationFactor, brokerIdWidth) > ZOOKEEPER_MAX_REQUEST_BYTES) {
+            Protocol.sendErrorResponse(clientChannel, "Too many partitions: the topic's ZooKeeper nodes exceed the "
+                    + ZOOKEEPER_MAX_REQUEST_BYTES + "-byte limit of one ZooKeeper request");
+            return;
+        }
 
         // As controller, create the topic
         if (isController.get()) {
@@ -986,6 +993,24 @@ public class SimpleKafkaBroker {
                 || c == '.' || c == '_' || c == '-');
     }
 
+    /** ZooKeeper's default jute.maxbuffer. The server closes the connection on a longer request. */
+    static final int ZOOKEEPER_MAX_REQUEST_BYTES = 0xfffff;
+
+    /**
+     * An upper bound on the size of the one ZooKeeper multi request that creates a topic, as ZooKeeper 3.8 encodes
+     * it after the length prefix: a request header (8 bytes) and a closing op header (9), plus per created node
+     * an op header (9), the path and data each with a 4-byte length, the open ACL (27) and flags (4). The topic
+     * and partitions nodes have no data. A partition node's data names each replica as its id and a separator.
+     */
+    static long createTopicRequestBytes(String topic, int numPartitions, short replicationFactor, int brokerIdWidth) {
+        int perNode = 9 + 4 + 4 + 27 + 4;
+        int topicNode = perNode + "/topics/".length() + topic.length();
+        int partitionsNode = topicNode + "/partitions".length();
+        int partitionNode = partitionsNode + "/".length() + String.valueOf(numPartitions - 1).length()
+                + replicationFactor * (brokerIdWidth + 1);
+        return 8 + 9 + topicNode + partitionsNode + (long) numPartitions * partitionNode;
+    }
+
     /**
      * Create a new topic with the specified configuration
      */
@@ -1006,8 +1031,9 @@ public class SimpleKafkaBroker {
                 LOGGER.warning("Topic already exists in ZooKeeper: " + topic);
                 return false;
             }
-            zkClient.createPersistentNode(topicPath, "");
-            zkClient.createPersistentNode(topicPath + "/partitions", "");
+            Map<String, String> nodes = new LinkedHashMap<>();
+            nodes.put(topicPath, "");
+            nodes.put(topicPath + "/partitions", "");
 
             // Create partitions
             List<Partition> partitions = new ArrayList<>();
@@ -1039,13 +1065,10 @@ public class SimpleKafkaBroker {
                     partitionData += follower + ",";
                 }
 
-                zkClient.createPersistentNode(partitionPath, partitionData);
-
-                LOGGER.info("Created partition " + partitionId +
-                        " for topic " + topic +
-                        " with leader " + leaderId +
-                        " and followers " + followers);
+                nodes.put(partitionPath, partitionData);
             }
+            zkClient.createPersistentNodes(nodes);
+            LOGGER.info("Created topic " + topic + " with " + numPartitions + " partitions");
 
             // Add topic to broker's metadata
             topics.put(topic, partitions);

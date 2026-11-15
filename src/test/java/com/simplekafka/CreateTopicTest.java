@@ -2,8 +2,10 @@ package com.simplekafka;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -14,8 +16,10 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.stream.Collectors;
 
+import org.apache.zookeeper.ZooKeeper;
 import org.junit.jupiter.api.Test;
 
+import com.simplekafka.broker.Protocol;
 import com.simplekafka.client.SimpleKafkaClient;
 
 class CreateTopicTest {
@@ -77,6 +81,17 @@ class CreateTopicTest {
                     .map(bytes -> new String(bytes, StandardCharsets.UTF_8))
                     .collect(Collectors.toList()));
             assertTrue(client.createTopic("demo2", 1, (short) 1), "create of a distinct name");
+        }
+    }
+
+    @Test
+    void createTooLargeForOneZooKeeperRequestIsRefusedAndWritesNothing() throws Exception {
+        try (TestCluster cluster = TestCluster.start(1);
+                ZooKeeper zk = cluster.openZooKeeper()) {
+            ByteBuffer response = cluster.request(1, Protocol.encodeCreateTopicRequest("huge", 20000, (short) 1));
+            assertEquals(Protocol.ERROR_RESPONSE, response.get(), "response type");
+            assertTrue(Protocol.readString(response).startsWith("Too many partitions"), "error message");
+            assertNull(zk.exists("/topics/huge", false), "/topics/huge in ZooKeeper");
         }
     }
 }

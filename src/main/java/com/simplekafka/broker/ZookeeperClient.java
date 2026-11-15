@@ -3,12 +3,14 @@ package com.simplekafka.broker;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
+import org.apache.zookeeper.Op;
 import org.apache.zookeeper.WatchedEvent;
 import org.apache.zookeeper.Watcher;
 import org.apache.zookeeper.ZooDefs;
@@ -73,6 +75,19 @@ public class ZookeeperClient implements Watcher {
             zooKeeper.setData(path, data.getBytes(), -1);
             LOGGER.info("Updated persistent node: " + path);
         }
+    }
+
+    /**
+     * Create persistent nodes, parents before children, in one transaction: either all of them exist afterwards
+     * or none do.
+     */
+    public void createPersistentNodes(Map<String, String> nodes) throws KeeperException, InterruptedException {
+        List<Op> ops = new ArrayList<>();
+        for (Map.Entry<String, String> node : nodes.entrySet()) {
+            ops.add(Op.create(node.getKey(), node.getValue().getBytes(), ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                    CreateMode.PERSISTENT));
+        }
+        zooKeeper.multi(ops);
     }
 
     /**
