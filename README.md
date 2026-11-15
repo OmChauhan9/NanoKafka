@@ -81,6 +81,28 @@ Each item names the test that proves it.
 - Client reads have no timeout. A broker that hangs while it keeps running blocks the client that is waiting on it.
 - On restart, an older segment with an index that exists but is wrong is trusted as it is.
 
+## Future work
+
+None of these is built yet. Each one removes limits from the list above, and each comes with a test or a benchmark that proves it.
+
+### Replication that survives a leader crash
+
+Followers fetch from the leader at the leader's offsets, instead of the leader pushing copies. The leader tracks which followers are caught up, called the in-sync replicas, and a high watermark, which is the last offset that every in-sync replica has stored. A producer can ask for `acks=all`, which makes the leader reply only after every in-sync replica has the message. Consumers read only up to the high watermark. The controller picks a new leader only from the in-sync replicas, and a leader epoch tells a follower which of its records to discard after a failover.
+
+This removes three limits: lost messages on failover, reused offsets, and followers that store messages in a different order. A crash test would kill the leader again and again under concurrent producers. It would then check that no acknowledged message is lost or duplicated, and that every replica ends up byte-identical. `scripts/bench.sh` would report the latency cost of `acks=all` over `acks=1`.
+
+### Group commit for disk flushes
+
+Today every append flushes the log and the index on its own. With group commit, appends that arrive close together share one flush, and each producer still gets its reply only after its message is on disk. The producer could also send several messages in one request.
+
+This targets the limit of about 190 messages per second per partition. `scripts/bench.sh` would measure the change before and after on the same machine. A durability test would stop the broker in the middle of a batch and check that every acknowledged message is still there after a restart.
+
+### Consumer groups with saved offsets
+
+Several consumers share the partitions of a topic. Each consumer commits its offset, so a restarted consumer continues where it stopped. When a consumer joins or leaves, the partitions are assigned again.
+
+This removes the limit that consumer offsets live in memory only. Tests would add, stop, and restart consumers, then check that every message is delivered, and that a message is delivered twice only in documented cases.
+
 ## Benchmarks
 
 `scripts/bench.sh` builds the code, runs four scenarios, and writes a report to `bench/results/`. Each report records the machine, the JDK, and the git commit. [bench/README.md](bench/README.md) explains each scenario.
