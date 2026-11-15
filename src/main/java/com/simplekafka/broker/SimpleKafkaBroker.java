@@ -414,6 +414,8 @@ public class SimpleKafkaBroker {
             clusterMetadata.remove(brokerId);
             LOGGER.info("Removed broker: " + brokerId);
         }
+        // Once back, a broker that left may hold state it read before changes nobody told it about.
+        syncedBrokers.retainAll(clusterMetadata.keySet());
         return brokerIds;
     }
 
@@ -539,7 +541,6 @@ public class SimpleKafkaBroker {
             }
         }
 
-        syncedBrokers.retainAll(clusterMetadata.keySet());
         for (int brokerId : clusterMetadata.keySet()) {
             if (brokerId == this.brokerId) {
                 continue;
@@ -955,16 +956,8 @@ public class SimpleKafkaBroker {
             return;
         }
 
-        // Validate parameters
-        if (numPartitions <= 0 || replicationFactor <= 0 ||
-                replicationFactor > clusterMetadata.size()) {
+        if (numPartitions <= 0 || replicationFactor <= 0) {
             Protocol.sendErrorResponse(clientChannel, "Invalid topic configuration");
-            return;
-        }
-        int brokerIdWidth = clusterMetadata.keySet().stream().mapToInt(id -> String.valueOf(id).length()).max().orElse(1);
-        if (createTopicRequestBytes(topic, numPartitions, replicationFactor, brokerIdWidth) > ZOOKEEPER_MAX_REQUEST_BYTES) {
-            Protocol.sendErrorResponse(clientChannel, "Too many partitions: the topic's ZooKeeper nodes exceed the "
-                    + ZOOKEEPER_MAX_REQUEST_BYTES + "-byte limit of one ZooKeeper request");
             return;
         }
 
@@ -972,17 +965,8 @@ public class SimpleKafkaBroker {
         if (isController.get()) {
             ByteBuffer response;
             try {
-                response = clusterEvents.submit(() -> {
-                    if (nameTakenIgnoringCase(topic)) {
-                        return Protocol.encodeErrorResponse("Topic already exists");
-                    }
-                    boolean created = createTopic(topic, numPartitions, replicationFactor);
-                    ByteBuffer status = ByteBuffer.allocate(2);
-                    status.put(Protocol.CREATE_TOPIC_RESPONSE);
-                    status.put((byte) (created ? 0 : 1));
-                    status.flip();
-                    return status;
-                }).get();
+                response = clusterEvents.submit(() -> createTopicAsController(topic, numPartitions, replicationFactor))
+                        .get();
             } catch (RejectedExecutionException | ExecutionException e) {
                 LOGGER.log(Level.SEVERE, "Failed to create topic", e);
                 response = Protocol.encodeErrorResponse("Failed to create topic");
@@ -995,6 +979,32 @@ public class SimpleKafkaBroker {
             // Forward to controller
             forwardCreateTopicToController(clientChannel, topic, numPartitions, replicationFactor);
         }
+    }
+
+    /**
+     * Check and create a topic on clusterEvents, and return the reply. The checks, the partition assignment and
+     * the brokers told about the topic all use the brokers registered in ZooKeeper when this runs.
+     */
+    private ByteBuffer createTopicAsController(String topic, int numPartitions, short replicationFactor)
+            throws IOException, KeeperException, InterruptedException {
+        refreshBrokers();
+        if (replicationFactor > clusterMetadata.size()) {
+            return Protocol.encodeErrorResponse("Invalid topic configuration");
+        }
+        int brokerIdWidth = clusterMetadata.keySet().stream().mapToInt(id -> String.valueOf(id).length()).max().orElse(1);
+        if (createTopicRequestBytes(topic, numPartitions, replicationFactor, brokerIdWidth) > ZOOKEEPER_MAX_REQUEST_BYTES) {
+            return Protocol.encodeErrorResponse("Too many partitions: the topic's ZooKeeper nodes exceed the "
+                    + ZOOKEEPER_MAX_REQUEST_BYTES + "-byte limit of one ZooKeeper request");
+        }
+        if (nameTakenIgnoringCase(topic)) {
+            return Protocol.encodeErrorResponse("Topic already exists");
+        }
+        boolean created = createTopic(topic, numPartitions, replicationFactor);
+        ByteBuffer status = ByteBuffer.allocate(2);
+        status.put(Protocol.CREATE_TOPIC_RESPONSE);
+        status.put((byte) (created ? 0 : 1));
+        status.flip();
+        return status;
     }
 
     /**
