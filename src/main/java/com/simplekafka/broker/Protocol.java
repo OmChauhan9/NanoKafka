@@ -36,6 +36,13 @@ public class Protocol {
 
     public static final int MAX_FRAME_BYTES = 16 * 1024 * 1024;
 
+    private static final int FETCH_RESPONSE_HEADER_BYTES = 5; // type, message count
+    private static final int FETCH_RECORD_HEADER_BYTES = 12; // offset, length
+
+    /** The largest message a fetch response can carry in one frame. */
+    public static final int MAX_FETCHABLE_MESSAGE_BYTES =
+            MAX_FRAME_BYTES - FETCH_RESPONSE_HEADER_BYTES - FETCH_RECORD_HEADER_BYTES;
+
     /**
      * Write one frame: a 4-byte big-endian body length, then the body.
      */
@@ -139,6 +146,33 @@ public class Protocol {
         buffer.putInt(partition);
         buffer.putLong(offset);
         buffer.putInt(maxBytes);
+        buffer.flip();
+        return buffer;
+    }
+
+    /**
+     * Encode a fetch response holding the longest prefix of messages, starting at firstOffset, that
+     * fits in one frame.
+     */
+    public static ByteBuffer encodeFetchResponse(long firstOffset, List<byte[]> messages) {
+        int size = FETCH_RESPONSE_HEADER_BYTES;
+        int count = 0;
+        for (byte[] message : messages) {
+            if (message.length > MAX_FRAME_BYTES - size - FETCH_RECORD_HEADER_BYTES) {
+                break;
+            }
+            size += FETCH_RECORD_HEADER_BYTES + message.length;
+            count++;
+        }
+
+        ByteBuffer buffer = ByteBuffer.allocate(size);
+        buffer.put(FETCH_RESPONSE);
+        buffer.putInt(count);
+        for (int i = 0; i < count; i++) {
+            buffer.putLong(firstOffset + i);
+            buffer.putInt(messages.get(i).length);
+            buffer.put(messages.get(i));
+        }
         buffer.flip();
         return buffer;
     }
