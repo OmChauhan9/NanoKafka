@@ -26,6 +26,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+import org.apache.zookeeper.KeeperException;
+
 public class SimpleKafkaBroker {
     private static final Logger LOGGER = Logger.getLogger(SimpleKafkaBroker.class.getName());
     private static final String DATA_DIR = "data";
@@ -627,6 +629,12 @@ public class SimpleKafkaBroker {
 
         LOGGER.info("Produce request for topic: " + topic + ", partition: " + partition);
 
+        if (messageSize > Protocol.maxMessageBytes(topic)) {
+            Protocol.sendErrorResponse(clientChannel, "Message of " + messageSize
+                    + " bytes exceeds the largest of " + Protocol.maxMessageBytes(topic) + " bytes this topic accepts");
+            return;
+        }
+
         // Check if topic exists
         if (!topics.containsKey(topic)) {
             Protocol.sendErrorResponse(clientChannel, "Topic does not exist");
@@ -659,8 +667,9 @@ public class SimpleKafkaBroker {
         // Append message to log
         long offset = targetPartition.append(message);
 
-        // Replicate to followers
-        replicateToFollowers(topic, targetPartition, message, offset);
+        if (offset >= 0) {
+            replicateToFollowers(topic, targetPartition, message, offset);
+        }
 
         // Send acknowledgment to client
         ByteBuffer response = ByteBuffer.allocate(10);
@@ -806,40 +815,10 @@ public class SimpleKafkaBroker {
             return;
         }
 
-        // Check if the offset is valid
-        if (offset >= targetPartition.getLogEndOffset()) {
-            // No messages available at this offset
-            ByteBuffer response = ByteBuffer.allocate(5);
-            response.put(Protocol.FETCH_RESPONSE);
-            response.putInt(0); // 0 messages
-            response.flip();
-            Protocol.writeFrame(clientChannel, response);
-            return;
-        }
-
-        // Read messages from log
-        List<byte[]> messages = targetPartition.readMessages(offset, maxBytes);
-
-        // Send response
-        int totalSize = 5; // 1 byte for response type, 4 bytes for message count
-        for (byte[] msg : messages) {
-            totalSize += 12 + msg.length; // 8 bytes for offset, 4 bytes for length, plus message bytes
-        }
-
-        ByteBuffer response = ByteBuffer.allocate(totalSize);
-        response.put(Protocol.FETCH_RESPONSE);
-        response.putInt(messages.size());
-
-        long currentOffset = offset;
-        for (byte[] msg : messages) {
-            response.putLong(currentOffset);
-            response.putInt(msg.length);
-            response.put(msg);
-            currentOffset++;
-        }
-
-        response.flip();
-        Protocol.writeFrame(clientChannel, response);
+        List<byte[]> messages = offset >= targetPartition.getLogEndOffset()
+                ? List.of()
+                : targetPartition.readMessages(offset, Math.min(maxBytes, Protocol.MAX_FRAME_BYTES));
+        Protocol.writeFrame(clientChannel, Protocol.encodeFetchResponse(offset, messages));
     }
 
     /**
@@ -946,7 +925,7 @@ public class SimpleKafkaBroker {
         if (isController.get()) {
             boolean created;
             synchronized (this) {
-                if (topics.containsKey(topic)) {
+                if (nameTakenIgnoringCase(topic)) {
                     Protocol.sendErrorResponse(clientChannel, "Topic already exists");
                     return;
                 }
@@ -962,6 +941,20 @@ public class SimpleKafkaBroker {
             // Forward to controller
             forwardCreateTopicToController(clientChannel, topic, numPartitions, replicationFactor);
         }
+    }
+
+    /**
+     * Names that differ only in case share a partition directory on a case-insensitive filesystem,
+     * so a name is taken when it matches a known topic or a ZooKeeper topic ignoring case.
+     */
+    private boolean nameTakenIgnoringCase(String topic) throws IOException {
+        List<String> names = new ArrayList<>(topics.keySet());
+        try {
+            names.addAll(zkClient.getChildren("/topics"));
+        } catch (KeeperException | InterruptedException e) {
+            throw new IOException("Failed to list topics in ZooKeeper", e);
+        }
+        return names.stream().anyMatch(topic::equalsIgnoreCase);
     }
 
     /**

@@ -36,6 +36,19 @@ public class Protocol {
 
     public static final int MAX_FRAME_BYTES = 16 * 1024 * 1024;
 
+    private static final int FETCH_RESPONSE_HEADER_BYTES = 5; // type, message count
+    private static final int FETCH_RECORD_HEADER_BYTES = 12; // offset, length
+
+    private static final int REPLICATE_REQUEST_HEADER_BYTES = 19; // type, topic length, partition, offset, length
+
+    /**
+     * The largest message the broker accepts for a topic. Every follower must receive it in one replicate
+     * frame, which always carries more overhead than a fetch response holding the same message.
+     */
+    public static int maxMessageBytes(String topic) {
+        return MAX_FRAME_BYTES - REPLICATE_REQUEST_HEADER_BYTES - topic.getBytes(StandardCharsets.UTF_8).length;
+    }
+
     /**
      * Write one frame: a 4-byte big-endian body length, then the body.
      */
@@ -139,6 +152,33 @@ public class Protocol {
         buffer.putInt(partition);
         buffer.putLong(offset);
         buffer.putInt(maxBytes);
+        buffer.flip();
+        return buffer;
+    }
+
+    /**
+     * Encode a fetch response holding the longest prefix of messages, starting at firstOffset, that
+     * fits in one frame.
+     */
+    public static ByteBuffer encodeFetchResponse(long firstOffset, List<byte[]> messages) {
+        int size = FETCH_RESPONSE_HEADER_BYTES;
+        int count = 0;
+        for (byte[] message : messages) {
+            if (message.length > MAX_FRAME_BYTES - size - FETCH_RECORD_HEADER_BYTES) {
+                break;
+            }
+            size += FETCH_RECORD_HEADER_BYTES + message.length;
+            count++;
+        }
+
+        ByteBuffer buffer = ByteBuffer.allocate(size);
+        buffer.put(FETCH_RESPONSE);
+        buffer.putInt(count);
+        for (int i = 0; i < count; i++) {
+            buffer.putLong(firstOffset + i);
+            buffer.putInt(messages.get(i).length);
+            buffer.put(messages.get(i));
+        }
         buffer.flip();
         return buffer;
     }

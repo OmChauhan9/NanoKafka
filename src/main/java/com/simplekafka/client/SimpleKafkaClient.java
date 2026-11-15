@@ -7,7 +7,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -24,9 +23,8 @@ public class SimpleKafkaClient {
 
     private final String bootstrapBroker;
     private final int bootstrapPort;
-    private final Map<String, TopicMetadata> topicMetadata;
-    private final Map<Integer, BrokerInfo> brokers;
     private final AtomicInteger correlationId;
+    private volatile Snapshot snapshot = new Snapshot(Map.of(), Map.of());
 
     /**
      * Create a SimpleKafka client
@@ -37,8 +35,6 @@ public class SimpleKafkaClient {
     public SimpleKafkaClient(String bootstrapBroker, int bootstrapPort) {
         this.bootstrapBroker = bootstrapBroker;
         this.bootstrapPort = bootstrapPort;
-        this.topicMetadata = new ConcurrentHashMap<>();
-        this.brokers = new ConcurrentHashMap<>();
         this.correlationId = new AtomicInteger(0);
     }
 
@@ -60,14 +56,12 @@ public class SimpleKafkaClient {
             throw new IOException("Failed to fetch metadata: " + result.getError());
         }
 
-        // Update broker information
-        brokers.clear();
+        Map<Integer, BrokerInfo> brokers = new HashMap<>();
         for (BrokerInfo broker : result.getBrokers()) {
             brokers.put(broker.getId(), new BrokerInfo(broker.getId(), broker.getHost(), broker.getPort()));
         }
 
-        // Update topic metadata
-        topicMetadata.clear();
+        Map<String, TopicMetadata> topics = new HashMap<>();
         for (Protocol.TopicMetadata topic : result.getTopics()) {
             List<PartitionInfo> partitions = new ArrayList<>();
 
@@ -78,11 +72,12 @@ public class SimpleKafkaClient {
                         partition.getReplicas()));
             }
 
-            topicMetadata.put(topic.getName(), new TopicMetadata(topic.getName(), partitions));
+            topics.put(topic.getName(), new TopicMetadata(topic.getName(), partitions));
         }
+        snapshot = new Snapshot(brokers, topics);
 
         LOGGER.info("Metadata refreshed: " + brokers.size() + " brokers, " +
-                topicMetadata.size() + " topics");
+                topics.size() + " topics");
     }
 
     /**
@@ -90,8 +85,10 @@ public class SimpleKafkaClient {
      */
     public boolean createTopic(String topic, int numPartitions, short replicationFactor) throws IOException {
         // Find a broker to send the request to (prefer controller if known)
+        Map<Integer, BrokerInfo> brokers = snapshot.brokers;
         if (brokers.isEmpty()) {
             refreshMetadata();
+            brokers = snapshot.brokers;
             if (brokers.isEmpty()) {
                 throw new IOException("No brokers available");
             }
@@ -129,7 +126,7 @@ public class SimpleKafkaClient {
     private void awaitTopicInMetadata(String topic) throws IOException {
         long deadline = System.nanoTime() + TOPIC_VISIBLE_TIMEOUT_NANOS;
         refreshMetadata();
-        while (!topicMetadata.containsKey(topic) && System.nanoTime() < deadline) {
+        while (!snapshot.topics.containsKey(topic) && System.nanoTime() < deadline) {
             try {
                 Thread.sleep(50);
             } catch (InterruptedException e) {
@@ -138,7 +135,7 @@ public class SimpleKafkaClient {
             }
             refreshMetadata();
         }
-        if (!topicMetadata.containsKey(topic)) {
+        if (!snapshot.topics.containsKey(topic)) {
             throw new IOException("Topic " + topic + " was created but is not in metadata after 5 s");
         }
     }
@@ -158,15 +155,16 @@ public class SimpleKafkaClient {
     }
 
     private long sendOnce(String topic, int partition, byte[] message) throws IOException {
-        if (!topicMetadata.containsKey(topic)) {
+        TopicMetadata metadata = snapshot.topics.get(topic);
+        if (metadata == null) {
             refreshMetadata();
-            if (!topicMetadata.containsKey(topic)) {
+            metadata = snapshot.topics.get(topic);
+            if (metadata == null) {
                 throw new IOException("Topic not found: " + topic);
             }
         }
 
         // Find the leader for the partition
-        TopicMetadata metadata = topicMetadata.get(topic);
         PartitionInfo partitionInfo = null;
 
         for (PartitionInfo info : metadata.getPartitions()) {
@@ -181,11 +179,11 @@ public class SimpleKafkaClient {
         }
 
         int leaderId = partitionInfo.getLeader();
-        BrokerInfo leader = brokers.get(leaderId);
+        BrokerInfo leader = snapshot.brokers.get(leaderId);
 
         if (leader == null) {
             refreshMetadata();
-            leader = brokers.get(leaderId);
+            leader = snapshot.brokers.get(leaderId);
 
             if (leader == null) {
                 throw new IOException("Leader broker not found: " + leaderId);
@@ -218,15 +216,16 @@ public class SimpleKafkaClient {
     }
 
     private List<byte[]> fetchOnce(String topic, int partition, long offset, int maxBytes) throws IOException {
-        if (!topicMetadata.containsKey(topic)) {
+        TopicMetadata metadata = snapshot.topics.get(topic);
+        if (metadata == null) {
             refreshMetadata();
-            if (!topicMetadata.containsKey(topic)) {
+            metadata = snapshot.topics.get(topic);
+            if (metadata == null) {
                 throw new IOException("Topic not found: " + topic);
             }
         }
 
         // Find the leader for the partition
-        TopicMetadata metadata = topicMetadata.get(topic);
         PartitionInfo partitionInfo = null;
 
         for (PartitionInfo info : metadata.getPartitions()) {
@@ -241,11 +240,11 @@ public class SimpleKafkaClient {
         }
 
         int leaderId = partitionInfo.getLeader();
-        BrokerInfo leader = brokers.get(leaderId);
+        BrokerInfo leader = snapshot.brokers.get(leaderId);
 
         if (leader == null) {
             refreshMetadata();
-            leader = brokers.get(leaderId);
+            leader = snapshot.brokers.get(leaderId);
 
             if (leader == null) {
                 throw new IOException("Leader broker not found: " + leaderId);
@@ -273,21 +272,34 @@ public class SimpleKafkaClient {
      * Get metadata for all topics
      */
     public Map<String, TopicMetadata> getTopicMetadata() {
-        return new HashMap<>(topicMetadata);
+        return new HashMap<>(snapshot.topics);
     }
 
     /**
      * Get metadata for a specific topic
      */
     public TopicMetadata getTopicMetadata(String topic) {
-        return topicMetadata.get(topic);
+        return snapshot.topics.get(topic);
     }
 
     /**
      * Get broker information
      */
     public Map<Integer, BrokerInfo> getBrokers() {
-        return new HashMap<>(brokers);
+        return new HashMap<>(snapshot.brokers);
+    }
+
+    /**
+     * One metadata response. A refresh replaces the whole snapshot, so a reader never sees it half built.
+     */
+    private static final class Snapshot {
+        final Map<Integer, BrokerInfo> brokers;
+        final Map<String, TopicMetadata> topics;
+
+        Snapshot(Map<Integer, BrokerInfo> brokers, Map<String, TopicMetadata> topics) {
+            this.brokers = Map.copyOf(brokers);
+            this.topics = Map.copyOf(topics);
+        }
     }
 
     /**
