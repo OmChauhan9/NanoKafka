@@ -116,13 +116,17 @@ public class Protocol {
      * Send an error response to the client
      */
     public static void sendErrorResponse(SocketChannel channel, String errorMessage) throws IOException {
+        writeFrame(channel, encodeErrorResponse(errorMessage));
+    }
+
+    public static ByteBuffer encodeErrorResponse(String errorMessage) {
         byte[] error = errorMessage.getBytes(StandardCharsets.UTF_8);
         ByteBuffer buffer = ByteBuffer.allocate(3 + error.length);
         buffer.put(ERROR_RESPONSE);
         buffer.putShort((short) error.length);
         buffer.put(error);
         buffer.flip();
-        writeFrame(channel, buffer);
+        return buffer;
     }
 
     /**

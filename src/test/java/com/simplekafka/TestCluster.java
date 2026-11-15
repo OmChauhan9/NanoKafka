@@ -9,9 +9,12 @@ import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
@@ -143,6 +146,60 @@ public final class TestCluster implements AutoCloseable {
             }
         }
         return messages;
+    }
+
+    /**
+     * Each way the given brokers' metadata for a topic differs from ZooKeeper's partition nodes, plus the
+     * partitions ZooKeeper gives to a broker with no node under /brokers. Empty when everything agrees.
+     */
+    public List<String> disagreementsWithZooKeeper(ZooKeeper zk, String topic, int... brokerIds) throws Exception {
+        Map<Integer, Integer> zkLeaders = new HashMap<>();
+        for (String id : zk.getChildren("/topics/" + topic + "/partitions", false)) {
+            String data = new String(zk.getData("/topics/" + topic + "/partitions/" + id, false, null),
+                    StandardCharsets.UTF_8);
+            zkLeaders.put(Integer.parseInt(id), Integer.parseInt(data.split(";")[0]));
+        }
+        List<String> registered = zk.getChildren("/brokers", false);
+        List<String> found = new ArrayList<>();
+        long orphaned = zkLeaders.values().stream().filter(leader -> !registered.contains(String.valueOf(leader))).count();
+        if (orphaned > 0) {
+            found.add("ZooKeeper: " + orphaned + " partitions led by an unregistered broker");
+        }
+        for (int brokerId : brokerIds) {
+            SimpleKafkaClient.TopicMetadata metadata;
+            try {
+                metadata = client(brokerId).getTopicMetadata(topic);
+            } catch (IOException e) {
+                found.add("broker " + brokerId + ": unreachable");
+                continue;
+            }
+            Map<Integer, Integer> leaders = new HashMap<>();
+            if (metadata != null) {
+                metadata.getPartitions().forEach(p -> leaders.put(p.getId(), p.getLeader()));
+            }
+            long missing = zkLeaders.keySet().stream().filter(id -> !leaders.containsKey(id)).count();
+            long differ = zkLeaders.entrySet().stream()
+                    .filter(e -> leaders.containsKey(e.getKey()) && !leaders.get(e.getKey()).equals(e.getValue()))
+                    .count();
+            if (missing > 0) {
+                found.add("broker " + brokerId + ": " + missing + " of " + zkLeaders.size() + " partitions missing");
+            }
+            if (differ > 0) {
+                found.add("broker " + brokerId + ": " + differ + " leaders differ from ZooKeeper");
+            }
+        }
+        return found;
+    }
+
+    /** Polls disagreementsWithZooKeeper until it is empty or 20 s pass, and returns its last result. */
+    public List<String> awaitAgreementWithZooKeeper(ZooKeeper zk, String topic, int... brokerIds) throws Exception {
+        long deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos();
+        List<String> found = disagreementsWithZooKeeper(zk, topic, brokerIds);
+        while (!found.isEmpty() && System.nanoTime() < deadline) {
+            Thread.sleep(100);
+            found = disagreementsWithZooKeeper(zk, topic, brokerIds);
+        }
+        return found;
     }
 
     public void awaitTopicEverywhere(String topic) {
