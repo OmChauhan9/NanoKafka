@@ -123,8 +123,8 @@ public class SimpleKafkaClient {
     }
 
     /**
-     * The controller tells other brokers about a new topic after it replies, so the broker this client
-     * reads metadata from may not know the topic yet.
+     * The controller replies once every broker loads the new topic or 5 s pass, so a slow broker this
+     * client reads metadata from may not know the topic yet.
      */
     private void awaitTopicInMetadata(String topic) throws IOException {
         long deadline = System.nanoTime() + TOPIC_VISIBLE_TIMEOUT_NANOS;

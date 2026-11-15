@@ -61,7 +61,7 @@ Each item names the test that proves it.
 - Each segment has a dense index, so finding a message's byte position is one seek. A binary search over segment base offsets picks the segment. A single-message read takes about 23 µs on an Apple M3 Pro, whatever the message's position. (`scripts/bench.sh`)
 - `Protocol` defines the binary messages. Every request and response starts with a 4-byte length, so messages larger than one network read work. (`WireFramingTest`)
 - The broker serves each connection on its own thread with blocking sockets. (`ConnectionHandlingTest`)
-- The controller handles topic creation. Two concurrent creates of one name produce exactly one topic, and names that are not safe as paths are rejected. (`CreateTopicTest`, `TopicNameTest`)
+- The controller handles topic creation. It replies once every live broker has loaded the new topic, so a produce to any partition right after succeeds. A broker that has not loaded it within 5 s does not hold up the reply. Two concurrent creates of one name produce exactly one topic, and names that are not safe as paths are rejected. (`CreateTopicTest`, `CreateTopicReadyTest`, `TopicNameTest`)
 - ZooKeeper elects one controller. A restarted broker registers again once its old session ends. (`ControllerRestartTest`, `StaleBrokerSessionTest`, `StaleControllerSessionTest`)
 - When a leader dies, the controller makes a live replica of the partition its leader and tells every broker. A partition with no live replica has no leader until one returns. (`LeaderFailoverTest`, `ControllerRestartTest`)
 - The leader appends each message, replies to the producer, then sends a copy to each follower in the background. (`ReplicationTest`)
