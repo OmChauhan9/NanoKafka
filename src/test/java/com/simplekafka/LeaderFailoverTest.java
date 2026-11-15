@@ -16,6 +16,7 @@ import org.junit.jupiter.api.Test;
 import com.simplekafka.broker.Protocol;
 import com.simplekafka.client.SimpleKafkaClient;
 import com.simplekafka.client.SimpleKafkaClient.PartitionInfo;
+import com.simplekafka.client.SimpleKafkaConsumer;
 
 class LeaderFailoverTest {
 
@@ -45,6 +46,52 @@ class LeaderFailoverTest {
         }
     }
 
+    // Broker 2 comes back as a follower that missed every message, while both readers still name it leader.
+    @Test
+    void aReaderWithCachedMetadataReadsFromTheNewLeaderAfterTheOldOneReturns() throws Exception {
+        try (TestCluster cluster = TestCluster.start(2)) {
+            SimpleKafkaClient admin = cluster.client(1);
+            admin.createTopic("orders", 2, (short) 2);
+            cluster.awaitTopicEverywhere("orders");
+            int partition = partitionLedBy(admin, "orders", 2);
+
+            SimpleKafkaClient client = cluster.client(1);
+            SimpleKafkaConsumer consumer = new SimpleKafkaConsumer("localhost", cluster.port(1), "orders", partition);
+            consumer.initialize();
+
+            cluster.stopBroker(2);
+            TestCluster.await("broker 1 to lead partition " + partition, () -> {
+                try {
+                    return leaderOf(cluster.client(1), "orders", partition) == 1;
+                } catch (IOException e) {
+                    return false;
+                }
+            });
+            admin.refreshMetadata();
+            admin.send("orders", partition, "m1".getBytes(StandardCharsets.UTF_8));
+            admin.send("orders", partition, "m2".getBytes(StandardCharsets.UTF_8));
+            cluster.restartBroker(2);
+            TestCluster.await("broker 2 to name broker 1 leader of partition " + partition, () -> {
+                try {
+                    return leaderOf(cluster.client(2), "orders", partition) == 1;
+                } catch (IOException e) {
+                    return false;
+                }
+            });
+
+            assertEquals(List.of("m1", "m2"), strings(consumer.poll()), "consumer poll");
+            assertEquals(List.of("m1", "m2"), strings(client.fetch("orders", partition, 0, 1 << 20)), "client fetch");
+        }
+    }
+
+    private static List<String> strings(List<byte[]> messages) {
+        List<String> out = new ArrayList<>();
+        for (byte[] message : messages) {
+            out.add(new String(message, StandardCharsets.UTF_8));
+        }
+        return out;
+    }
+
     // Broker 1 starts first and becomes controller, so it is neither the old nor the new leader here.
     @Test
     void theSurvivingReplicaTakesOverAndEveryBrokerRoutesToIt() throws Exception {
@@ -62,8 +109,7 @@ class LeaderFailoverTest {
             }
             TestCluster.await("broker 3 to hold all 5 messages", () -> {
                 try {
-                    return Protocol.decodeFetchResponse(cluster.request(3,
-                            Protocol.encodeFetchRequest("orders", partition, 0, 1 << 20))).getMessageCount() == 5;
+                    return TestCluster.messagesOnDisk(3, "orders", partition).size() == 5;
                 } catch (IOException e) {
                     return false;
                 }
