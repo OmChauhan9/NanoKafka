@@ -39,9 +39,15 @@ public class Protocol {
     private static final int FETCH_RESPONSE_HEADER_BYTES = 5; // type, message count
     private static final int FETCH_RECORD_HEADER_BYTES = 12; // offset, length
 
-    /** The largest message a fetch response can carry in one frame. */
-    public static final int MAX_FETCHABLE_MESSAGE_BYTES =
-            MAX_FRAME_BYTES - FETCH_RESPONSE_HEADER_BYTES - FETCH_RECORD_HEADER_BYTES;
+    private static final int REPLICATE_REQUEST_HEADER_BYTES = 19; // type, topic length, partition, offset, length
+
+    /**
+     * The largest message the broker accepts for a topic. Every follower must receive it in one replicate
+     * frame, which always carries more overhead than a fetch response holding the same message.
+     */
+    public static int maxMessageBytes(String topic) {
+        return MAX_FRAME_BYTES - REPLICATE_REQUEST_HEADER_BYTES - topic.getBytes(StandardCharsets.UTF_8).length;
+    }
 
     /**
      * Write one frame: a 4-byte big-endian body length, then the body.

@@ -16,9 +16,6 @@ import com.simplekafka.client.SimpleKafkaClient;
 
 class FetchFrameLimitTest {
 
-    // A fetch response is a 5-byte header (type, count) plus 12 bytes (offset, length) per message.
-    private static final int LARGEST_FETCHABLE_MESSAGE = Protocol.MAX_FRAME_BYTES - 5 - 12;
-
     @Test
     void fetchWithMaxBytesAboveTheFrameLimitReturnsPrefixesThatFit() throws Exception {
         try (TestCluster cluster = TestCluster.start(1)) {
@@ -49,7 +46,7 @@ class FetchFrameLimitTest {
             SimpleKafkaClient client = cluster.client(1);
             client.createTopic("t", 1, (short) 1);
 
-            byte[] largest = new byte[LARGEST_FETCHABLE_MESSAGE];
+            byte[] largest = new byte[Protocol.maxMessageBytes("t")];
             largest[0] = 1;
             largest[largest.length - 1] = 2;
             assertEquals(0, client.send("t", 0, largest));
@@ -57,7 +54,7 @@ class FetchFrameLimitTest {
             assertEquals(1, fetched.size());
             assertArrayEquals(largest, fetched.get(0));
 
-            assertThrows(IOException.class, () -> client.send("t", 0, new byte[LARGEST_FETCHABLE_MESSAGE + 1]),
+            assertThrows(IOException.class, () -> client.send("t", 0, new byte[Protocol.maxMessageBytes("t") + 1]),
                     "produce of a message one byte larger than any fetch can return");
             assertEquals(0, client.fetch("t", 0, 1, 1).size(), "rejected message was not appended");
         }

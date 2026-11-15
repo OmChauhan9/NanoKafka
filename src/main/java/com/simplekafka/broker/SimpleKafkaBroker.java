@@ -603,9 +603,9 @@ public class SimpleKafkaBroker {
 
         LOGGER.info("Produce request for topic: " + topic + ", partition: " + partition);
 
-        if (messageSize > Protocol.MAX_FETCHABLE_MESSAGE_BYTES) {
+        if (messageSize > Protocol.maxMessageBytes(topic)) {
             Protocol.sendErrorResponse(clientChannel, "Message of " + messageSize
-                    + " bytes exceeds the largest fetchable size of " + Protocol.MAX_FETCHABLE_MESSAGE_BYTES + " bytes");
+                    + " bytes exceeds the largest of " + Protocol.maxMessageBytes(topic) + " bytes this topic accepts");
             return;
         }
 
