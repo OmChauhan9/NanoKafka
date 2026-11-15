@@ -33,6 +33,7 @@ public class Protocol {
     public static final byte REPLICATE = 0x21;
     public static final byte REPLICATE_ACK = 0x22;
     public static final byte TOPIC_NOTIFICATION = 0x23;
+    public static final byte FORWARDED_PRODUCE = 0x24;
 
     public static final int MAX_FRAME_BYTES = 16 * 1024 * 1024;
 
@@ -137,6 +138,15 @@ public class Protocol {
         buffer.putInt(message.length);
         buffer.put(message);
         buffer.flip();
+        return buffer;
+    }
+
+    /**
+     * Encode the produce request a broker sends on to the leader it knows. The body matches a client's.
+     */
+    public static ByteBuffer encodeForwardedProduceRequest(String topic, int partition, byte[] message) {
+        ByteBuffer buffer = encodeProduceRequest(topic, partition, message);
+        buffer.put(0, FORWARDED_PRODUCE);
         return buffer;
     }
 
