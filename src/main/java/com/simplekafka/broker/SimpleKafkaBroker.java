@@ -1,5 +1,7 @@
 package com.simplekafka.broker;
 
+import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -825,69 +827,43 @@ public class SimpleKafkaBroker {
      * Handle metadata request from client
      */
     private void handleMetadataRequest(SocketChannel clientChannel, ByteBuffer buffer) throws IOException {
-        // Prepare response with metadata
-        int size = 5; // 1 byte for response type, 4 bytes for topic count
+        // Topics and brokers can be added while this runs, so write each count from the same copy as its entries.
+        List<BrokerInfo> brokers = new ArrayList<>(clusterMetadata.values());
+        List<Map.Entry<String, List<Partition>>> topicEntries = new ArrayList<>(topics.entrySet());
 
-        // Calculate size for topics metadata
-        for (Map.Entry<String, List<Partition>> entry : topics.entrySet()) {
-            size += 6 + entry.getKey().getBytes(StandardCharsets.UTF_8).length; // 2 bytes for length, string, 4 bytes for partition count
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        DataOutputStream response = new DataOutputStream(bytes);
+        response.writeByte(Protocol.METADATA_RESPONSE);
 
-            // Add size for each partition
-            size += entry.getValue().size() * 12; // 4 bytes for id, 4 bytes for leader, 4 bytes for follower count
-
-            // Add size for followers
-            for (Partition partition : entry.getValue()) {
-                size += partition.getFollowers().size() * 4; // 4 bytes per follower ID
-            }
-        }
-
-        // Add size for brokers metadata
-        size += 4; // 4 bytes for broker count
-        size += clusterMetadata.size() * 10; // 4 bytes for id, 2 bytes for host length, 4 bytes for port
-
-        // Add estimated size for broker hostnames
-        for (BrokerInfo broker : clusterMetadata.values()) {
-            size += broker.getHost().getBytes(StandardCharsets.UTF_8).length;
-        }
-
-        ByteBuffer response = ByteBuffer.allocate(size);
-        response.put(Protocol.METADATA_RESPONSE);
-
-        // Add broker metadata
-        response.putInt(clusterMetadata.size());
-        for (BrokerInfo broker : clusterMetadata.values()) {
-            response.putInt(broker.getId());
+        response.writeInt(brokers.size());
+        for (BrokerInfo broker : brokers) {
+            response.writeInt(broker.getId());
             byte[] host = broker.getHost().getBytes(StandardCharsets.UTF_8);
-            response.putShort((short) host.length);
-            response.put(host);
-            response.putInt(broker.getPort());
+            response.writeShort(host.length);
+            response.write(host);
+            response.writeInt(broker.getPort());
         }
 
-        // Add topic metadata
-        response.putInt(topics.size());
-        for (Map.Entry<String, List<Partition>> entry : topics.entrySet()) {
-            String topic = entry.getKey();
-            List<Partition> partitions = entry.getValue();
+        response.writeInt(topicEntries.size());
+        for (Map.Entry<String, List<Partition>> entry : topicEntries) {
+            byte[] topicBytes = entry.getKey().getBytes(StandardCharsets.UTF_8);
+            response.writeShort(topicBytes.length);
+            response.write(topicBytes);
+            response.writeInt(entry.getValue().size());
 
-            byte[] topicBytes = topic.getBytes(StandardCharsets.UTF_8);
-            response.putShort((short) topicBytes.length);
-            response.put(topicBytes);
-            response.putInt(partitions.size());
-
-            for (Partition partition : partitions) {
-                response.putInt(partition.getId());
-                response.putInt(partition.getLeader());
+            for (Partition partition : entry.getValue()) {
+                response.writeInt(partition.getId());
+                response.writeInt(partition.getLeader());
 
                 List<Integer> followers = partition.getFollowers();
-                response.putInt(followers.size());
-                for (Integer follower : followers) {
-                    response.putInt(follower);
+                response.writeInt(followers.size());
+                for (int follower : followers) {
+                    response.writeInt(follower);
                 }
             }
         }
 
-        response.flip();
-        Protocol.writeFrame(clientChannel, response);
+        Protocol.writeFrame(clientChannel, ByteBuffer.wrap(bytes.toByteArray()));
     }
 
     /**
