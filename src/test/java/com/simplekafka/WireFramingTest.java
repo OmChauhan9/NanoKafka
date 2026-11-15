@@ -2,6 +2,7 @@ package com.simplekafka;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.DataInputStream;
@@ -67,14 +68,12 @@ class WireFramingTest {
     }
 
     @Test
-    void nonAsciiTopicNameRoundTrips() throws Exception {
+    void nonAsciiTopicNameIsRejectedCleanly() throws Exception {
         SimpleKafkaClient client = cluster.client(1);
-        String topic = "café-日本";
-        createTopic(client, topic, 1);
 
-        byte[] message = "héllo".getBytes(StandardCharsets.UTF_8);
-        assertEquals(0L, client.send(topic, 0, message));
-        assertArrayEquals(message, client.fetch(topic, 0, 0, 1024 * 1024).get(0));
+        assertFalse(client.createTopic("café-日本", 1, (short) 1));
+        createTopic(client, "after-non-ascii", 1);
+        assertEquals(0L, client.send("after-non-ascii", 0, payload(10, 'n')));
     }
 
     @Test
