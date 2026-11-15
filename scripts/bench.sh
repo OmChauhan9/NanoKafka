@@ -85,7 +85,7 @@ trap 'rm -rf "$work"' EXIT
 
 device=$(df -P "$work" | awk 'NR == 2 {print $1}')
 if [ "$os" = Darwin ]; then
-  filesystem=$(mount | awk -v d="$device" '$1 == d {sub(/^\(/, "", $4); sub(/,$/, "", $4); print $4; exit}')
+  filesystem=$(mount | awk -v d="$device" '!found && $1 == d {sub(/^\(/, "", $4); sub(/,$/, "", $4); print $4; found = 1}')
 else
   filesystem=$(df -PT "$work" 2>/dev/null | awk 'NR == 2 {print $2}')
 fi
