@@ -8,6 +8,8 @@ import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
@@ -26,6 +28,13 @@ public class Partition {
     // createNewSegment formats names in the default locale, so their digits need not be ASCII.
     private static final Pattern SEGMENT_FILE = Pattern.compile("(\\d{20})\\.(log|index)",
             Pattern.UNICODE_CHARACTER_CLASS);
+    private static final ChannelOpener FILE_CHANNELS = path -> FileChannel.open(path, StandardOpenOption.READ,
+            StandardOpenOption.WRITE, StandardOpenOption.CREATE);
+
+    /** Opens the channels appends write through. Tests pass one that fails partway through a write. */
+    interface ChannelOpener {
+        FileChannel open(Path path) throws IOException;
+    }
 
     private final int id; // Unique partition identifier
     private volatile int leader; // Leader broker ID
@@ -33,11 +42,15 @@ public class Partition {
     private final String baseDir; // Directory for log storage
     private final AtomicLong nextOffset; // Next available message offset
     private final ReadWriteLock lock; // Concurrency control mechanism
-    private RandomAccessFile activeLogFile; // Currently active log file
     private FileChannel activeLogChannel; // Channel for file operations
     private final List<SegmentInfo> segments; // List of segments in the partition
+    private final ChannelOpener channels;
 
     public Partition(int id, int leader, List<Integer> followers, String baseDir) {
+        this(id, leader, followers, baseDir, FILE_CHANNELS);
+    }
+
+    Partition(int id, int leader, List<Integer> followers, String baseDir, ChannelOpener channels) {
         this.id = id;
         this.leader = leader;
         this.followers = followers;
@@ -45,6 +58,7 @@ public class Partition {
         this.nextOffset = new AtomicLong(0);
         this.lock = new ReentrantReadWriteLock();
         this.segments = new ArrayList<>();
+        this.channels = channels;
 
         initialize();
     }
@@ -175,12 +189,11 @@ public class Partition {
      * Open a segment for append operations
      */
     private void openSegmentForAppend(SegmentInfo segment) throws IOException {
-        RandomAccessFile logFile = new RandomAccessFile(segment.getLogPath(), "rw");
-        logFile.seek(logFile.length());
+        FileChannel logChannel = channels.open(Path.of(segment.getLogPath()));
+        logChannel.position(logChannel.size());
 
-        RandomAccessFile previous = activeLogFile;
-        activeLogFile = logFile;
-        activeLogChannel = logFile.getChannel();
+        FileChannel previous = activeLogChannel;
+        activeLogChannel = logChannel;
         if (previous != null) {
             try {
                 previous.close();
@@ -216,17 +229,15 @@ public class Partition {
             buffer.put(message);
             buffer.flip();
 
-            // Write to file
             long position = activeLogChannel.position();
-            activeLogChannel.write(buffer);
-
-            // Force write to disk
-            activeLogChannel.force(true);
-
             try {
+                while (buffer.hasRemaining()) {
+                    activeLogChannel.write(buffer);
+                }
+                activeLogChannel.force(true);
                 updateIndex(currentOffset, position);
             } catch (IOException e) {
-                // Drop the unindexed record so the next append reuses this offset and position.
+                // Drop the unacknowledged record so the next append reuses this offset and position.
                 activeLogChannel.truncate(position);
                 throw e;
             }
@@ -253,11 +264,10 @@ public class Partition {
 
         SegmentInfo currentSegment = segments.get(segments.size() - 1);
 
-        try (RandomAccessFile indexFile = new RandomAccessFile(currentSegment.getIndexPath(), "rw");
-                FileChannel indexChannel = indexFile.getChannel()) {
+        try (FileChannel indexChannel = channels.open(Path.of(currentSegment.getIndexPath()))) {
 
-            // Position at the end
-            indexChannel.position(indexChannel.size());
+            long size = indexChannel.size();
+            indexChannel.position(size);
 
             // Write offset and position
             ByteBuffer buffer = ByteBuffer.allocate(16);
@@ -265,8 +275,15 @@ public class Partition {
             buffer.putLong(position);
             buffer.flip();
 
-            indexChannel.write(buffer);
-            indexChannel.force(true);
+            try {
+                while (buffer.hasRemaining()) {
+                    indexChannel.write(buffer);
+                }
+                indexChannel.force(true);
+            } catch (IOException e) {
+                indexChannel.truncate(size);
+                throw e;
+            }
         }
     }
 
@@ -474,10 +491,6 @@ public class Partition {
         try {
             if (activeLogChannel != null && activeLogChannel.isOpen()) {
                 activeLogChannel.close();
-            }
-
-            if (activeLogFile != null) {
-                activeLogFile.close();
             }
         } catch (IOException e) {
             LOGGER.log(Level.SEVERE, "Failed to close partition resources", e);
