@@ -775,7 +775,7 @@ public class SimpleKafkaBroker {
 
         // Send acknowledgment
         ByteBuffer response = ByteBuffer.allocate(1);
-        response.put(Protocol.REPLICATE_ACK);
+        response.put(appendedOffset >= 0 ? Protocol.REPLICATE_ACK : (byte) 0);
         response.flip();
         Protocol.writeFrame(clientChannel, response);
     }
