@@ -10,7 +10,6 @@ import java.nio.file.Path;
 
 import org.junit.jupiter.api.Test;
 
-import com.simplekafka.broker.Protocol;
 import com.simplekafka.client.SimpleKafkaClient;
 
 class RejectedAppendTest {
@@ -36,12 +35,8 @@ class RejectedAppendTest {
 
             // Replication is asynchronous, so give a wrongly sent copy time to arrive before checking.
             Thread.sleep(1000);
-            assertEquals(0, messagesOn(cluster, follower), "follower stored a message its leader rejected");
+            assertEquals(0, TestCluster.messagesOnDisk(follower, "events", 0).size(),
+                    "follower stored a message its leader rejected");
         }
-    }
-
-    private static int messagesOn(TestCluster cluster, int brokerId) throws IOException {
-        return Protocol.decodeFetchResponse(
-                cluster.request(brokerId, Protocol.encodeFetchRequest("events", 0, 0, 1024))).getMessageCount();
     }
 }

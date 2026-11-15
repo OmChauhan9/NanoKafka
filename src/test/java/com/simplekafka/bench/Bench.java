@@ -514,11 +514,11 @@ public final class Bench {
         }
         int follower = leader2 == 1 ? 2 : 1;
         long deadline = System.nanoTime() + 20_000_000_000L;
-        while (System.nanoTime() < deadline && fetchRaw(cluster, follower, topics[1], next[1] - 1, 1).isEmpty()) {
+        while (System.nanoTime() < deadline && TestCluster.messagesOnDisk(follower, topics[1], 0).size() < next[1]) {
             Thread.sleep(100);
         }
         long followerVerified = 0;
-        List<byte[]> followerLog = fetchRaw(cluster, follower, topics[1], 0, BULK_FETCH_BYTES);
+        List<byte[]> followerLog = TestCluster.messagesOnDisk(follower, topics[1], 0);
         for (int offset = 0; offset < Math.min(followerLog.size(), next[1]); offset++) {
             if (Arrays.equals(followerLog.get(offset), payload(1_000_000L + offset, 100))) {
                 followerVerified++;
@@ -579,11 +579,6 @@ public final class Bench {
         } catch (IOException e) {
             return false;
         }
-    }
-
-    private static List<byte[]> fetchRaw(TestCluster cluster, int brokerId, String topic, long offset, int maxBytes) throws IOException {
-        Protocol.FetchResult result = Protocol.decodeFetchResponse(cluster.request(brokerId, Protocol.encodeFetchRequest(topic, 0, offset, maxBytes)));
-        return result.isSuccess() ? Arrays.asList(result.getMessages()) : List.of();
     }
 
     private void concurrentProduce(TestCluster cluster, Section section) throws Exception {
