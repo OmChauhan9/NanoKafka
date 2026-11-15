@@ -114,7 +114,8 @@ public class SimpleKafkaBroker {
     }
 
     /**
-     * Load topic metadata from ZooKeeper, or refresh the leader and followers of a loaded topic
+     * Load topic metadata from ZooKeeper, or refresh a loaded topic: update the leader and followers of its
+     * partitions and add any partition ZooKeeper has that this broker does not.
      */
     private synchronized void loadTopic(String topic) throws Exception {
         String topicPath = "/topics/" + topic;
@@ -147,13 +148,12 @@ public class SimpleKafkaBroker {
                 }
             }
 
-            if (loaded != null) {
-                for (Partition partition : loaded) {
-                    if (partition.getId() == id) {
-                        partition.setLeader(leader);
-                        partition.setFollowers(followers);
-                    }
-                }
+            Partition existing = loaded == null ? null
+                    : loaded.stream().filter(p -> p.getId() == id).findFirst().orElse(null);
+            if (existing != null) {
+                existing.setLeader(leader);
+                existing.setFollowers(followers);
+                partitions.add(existing);
                 continue;
             }
 
@@ -167,10 +167,9 @@ public class SimpleKafkaBroker {
                     ", leader: " + leader + ", followers: " + followers);
         }
 
-        if (loaded == null) {
-            topics.put(topic, partitions);
-            LOGGER.info("Successfully loaded topic: " + topic + " with " + partitions.size() + " partitions");
-        }
+        // A new list, not an in-place add, because request threads iterate the published one.
+        topics.put(topic, partitions);
+        LOGGER.info("Successfully loaded topic: " + topic + " with " + partitions.size() + " partitions");
     }
 
     /**
