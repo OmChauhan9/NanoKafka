@@ -20,6 +20,7 @@ import com.simplekafka.broker.Protocol;
  */
 public class SimpleKafkaClient {
     private static final Logger LOGGER = Logger.getLogger(SimpleKafkaClient.class.getName());
+    private static final long TOPIC_VISIBLE_TIMEOUT_NANOS = java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
 
     private final String bootstrapBroker;
     private final int bootstrapPort;
@@ -115,11 +116,31 @@ public class SimpleKafkaClient {
         boolean success = status == 0;
 
         if (success) {
-            // Refresh metadata to include new topic
-            refreshMetadata();
+            awaitTopicInMetadata(topic);
         }
 
         return success;
+    }
+
+    /**
+     * The controller tells other brokers about a new topic after it replies, so the broker this client
+     * reads metadata from may not know the topic yet.
+     */
+    private void awaitTopicInMetadata(String topic) throws IOException {
+        long deadline = System.nanoTime() + TOPIC_VISIBLE_TIMEOUT_NANOS;
+        refreshMetadata();
+        while (!topicMetadata.containsKey(topic) && System.nanoTime() < deadline) {
+            try {
+                Thread.sleep(50);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Interrupted waiting for topic " + topic, e);
+            }
+            refreshMetadata();
+        }
+        if (!topicMetadata.containsKey(topic)) {
+            throw new IOException("Topic " + topic + " was created but is not in metadata after 5 s");
+        }
     }
 
     /**

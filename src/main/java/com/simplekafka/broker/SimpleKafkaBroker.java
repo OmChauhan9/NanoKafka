@@ -11,8 +11,10 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -33,6 +35,7 @@ public class SimpleKafkaBroker {
     private final AtomicBoolean isController;
     private final Map<Integer, BrokerInfo> clusterMetadata;
     private final ZookeeperClient zkClient;
+    private final Set<SocketChannel> clientChannels = ConcurrentHashMap.newKeySet();
 
     public SimpleKafkaBroker(int brokerId, String host, int port, int zkPort) throws IOException {
         this.brokerId = brokerId;
@@ -231,6 +234,9 @@ public class SimpleKafkaBroker {
 
                 // Close server socket
                 serverChannel.close();
+                for (SocketChannel clientChannel : clientChannels) {
+                    closeClient(clientChannel);
+                }
 
                 // Close all topic partitions
                 for (List<Partition> partitions : topics.values()) {
@@ -348,6 +354,9 @@ public class SimpleKafkaBroker {
      * Participate in controller election
      */
     private void electController() {
+        if (!isRunning.get()) {
+            return;
+        }
         try {
             String controllerPath = "/controller";
 
@@ -493,9 +502,18 @@ public class SimpleKafkaBroker {
                 SocketChannel clientChannel = serverChannel.accept();
                 if (clientChannel != null) {
                     LOGGER.info("Accepted connection from " + clientChannel.getRemoteAddress());
-
-                    // Handle client connection in a separate thread
-                    executor.submit(() -> handleClient(clientChannel));
+                    clientChannels.add(clientChannel);
+                    // stop() clears isRunning before it closes clientChannels, so a channel accepted during
+                    // shutdown is closed either here or by stop().
+                    if (!isRunning.get()) {
+                        closeClient(clientChannel);
+                        continue;
+                    }
+                    try {
+                        executor.submit(() -> handleClient(clientChannel));
+                    } catch (RejectedExecutionException e) {
+                        closeClient(clientChannel);
+                    }
                 }
             } catch (Exception e) {
                 if (isRunning.get()) {
@@ -508,6 +526,15 @@ public class SimpleKafkaBroker {
     /**
      * Handle client connection
      */
+    private void closeClient(SocketChannel clientChannel) {
+        clientChannels.remove(clientChannel);
+        try {
+            clientChannel.close();
+        } catch (IOException e) {
+            LOGGER.log(Level.FINE, "Error closing client channel", e);
+        }
+    }
+
     private void handleClient(SocketChannel clientChannel) {
         try (clientChannel) {
             while (true) {
@@ -527,6 +554,8 @@ public class SimpleKafkaBroker {
             if (isRunning.get()) {
                 LOGGER.log(Level.SEVERE, "Error handling client", e);
             }
+        } finally {
+            clientChannels.remove(clientChannel);
         }
     }
 
@@ -864,6 +893,11 @@ public class SimpleKafkaBroker {
     private void handleCreateTopicRequest(SocketChannel clientChannel, ByteBuffer buffer) throws IOException {
         String topic = Protocol.readString(buffer);
 
+        if (!isValidTopicName(topic)) {
+            Protocol.sendErrorResponse(clientChannel, "Invalid topic name");
+            return;
+        }
+
         int numPartitions = buffer.getInt();
         short replicationFactor = buffer.getShort();
 
@@ -944,6 +978,17 @@ public class SimpleKafkaBroker {
             return;
         }
         Protocol.writeFrame(clientChannel, response);
+    }
+
+    /**
+     * A topic name becomes a directory and a ZooKeeper path, so it may hold only letters, digits,
+     * dots, underscores and hyphens, at most 249 characters, and may not be "." or "..".
+     */
+    static boolean isValidTopicName(String topic) {
+        if (topic.isEmpty() || topic.length() > 249 || topic.equals(".") || topic.equals("..")) {
+            return false;
+        }
+        return topic.codePoints().allMatch(c -> Character.isLetterOrDigit(c) || c == '.' || c == '_' || c == '-');
     }
 
     /**
