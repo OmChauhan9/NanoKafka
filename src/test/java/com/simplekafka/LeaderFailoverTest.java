@@ -109,8 +109,7 @@ class LeaderFailoverTest {
             }
             TestCluster.await("broker 3 to hold all 5 messages", () -> {
                 try {
-                    return Protocol.decodeFetchResponse(cluster.request(3,
-                            Protocol.encodeFetchRequest("orders", partition, 0, 1 << 20))).getMessageCount() == 5;
+                    return TestCluster.messagesOnDisk(3, "orders", partition).size() == 5;
                 } catch (IOException e) {
                     return false;
                 }

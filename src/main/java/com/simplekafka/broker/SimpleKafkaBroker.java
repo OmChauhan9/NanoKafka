@@ -817,6 +817,12 @@ public class SimpleKafkaBroker {
             return;
         }
 
+        // A follower can lag the leader, so a reader with stale metadata must refresh rather than read here.
+        if (targetPartition.getLeader() != brokerId) {
+            Protocol.sendErrorResponse(clientChannel, "Not the leader for partition " + partition);
+            return;
+        }
+
         List<byte[]> messages = offset >= targetPartition.getLogEndOffset()
                 ? List.of()
                 : targetPartition.readMessages(offset, Math.min(maxBytes, Protocol.MAX_FRAME_BYTES));

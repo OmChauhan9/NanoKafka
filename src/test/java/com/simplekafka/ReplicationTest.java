@@ -34,10 +34,8 @@ class ReplicationTest {
 
             TestCluster.await("broker " + follower + " to hold m0", () -> {
                 try {
-                    Protocol.FetchResult result = Protocol.decodeFetchResponse(
-                            cluster.request(follower, Protocol.encodeFetchRequest("orders", 0, 0, 1024)));
-                    return result.getMessageCount() == 1
-                            && "m0".equals(new String(result.getMessages()[0], StandardCharsets.UTF_8));
+                    List<byte[]> messages = TestCluster.messagesOnDisk(follower, "orders", 0);
+                    return messages.size() == 1 && "m0".equals(new String(messages.get(0), StandardCharsets.UTF_8));
                 } catch (Exception e) {
                     return false;
                 }

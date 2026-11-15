@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import org.apache.zookeeper.Watcher;
@@ -117,6 +118,31 @@ public final class TestCluster implements AutoCloseable {
     /** Sends one raw request to one broker, bypassing the client's leader routing. */
     public ByteBuffer request(int brokerId, ByteBuffer request) throws IOException {
         return Protocol.call("localhost", port(brokerId), request);
+    }
+
+    /**
+     * The messages in one broker's log for a partition, read from its segment files, since a broker answers a
+     * fetch only for partitions it leads. Stops at a record the broker is still writing.
+     */
+    public static List<byte[]> messagesOnDisk(int brokerId, String topic, int partition) throws IOException {
+        List<Path> segments;
+        try (Stream<Path> files = Files.list(Path.of("data", String.valueOf(brokerId), topic, String.valueOf(partition)))) {
+            segments = files.filter(p -> p.toString().endsWith(".log")).sorted().collect(Collectors.toList());
+        }
+        List<byte[]> messages = new ArrayList<>();
+        for (Path segment : segments) {
+            ByteBuffer log = ByteBuffer.wrap(Files.readAllBytes(segment));
+            while (log.remaining() >= 4) {
+                int size = log.getInt();
+                if (size < 0 || size > log.remaining()) {
+                    return messages;
+                }
+                byte[] message = new byte[size];
+                log.get(message);
+                messages.add(message);
+            }
+        }
+        return messages;
     }
 
     public void awaitTopicEverywhere(String topic) {
